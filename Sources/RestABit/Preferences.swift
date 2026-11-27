@@ -5,12 +5,21 @@ import RestABitCore
 struct ExcludedApp: Codable, Equatable, Identifiable {
     let id: String
     let name: String
+    let bundlePath: String?
+
+    init(id: String, name: String, bundlePath: String? = nil) {
+        self.id = id
+        self.name = name
+        self.bundlePath = bundlePath
+    }
 }
 
 final class Preferences: ObservableObject {
     @Published var rules: [Reminder: ReminderRule] { didSet { save(); changed?() } }
     @Published var excluded: [ExcludedApp] { didSet { save(); changed?() } }
     @Published var autoStart: Bool { didSet { save(); changed?() } }
+    @Published var pauseForFullScreen: Bool { didSet { save(); changed?() } }
+    @Published var showMenuBarProgress: Bool { didSet { save(); changed?() } }
     @Published var edgeMotion: EdgeMotion { didSet { save(); changed?() } }
     @Published var blinkMotion: BlinkMotion { didSet { save(); changed?() } }
     @Published var restScene: RestScene { didSet { save(); changed?() } }
@@ -26,6 +35,8 @@ final class Preferences: ObservableObject {
         var rules: [Reminder: ReminderRule]
         var excluded: [ExcludedApp]
         var autoStart: Bool
+        var pauseForFullScreen: Bool? = nil
+        var showMenuBarProgress: Bool? = nil
         var edgeMotion: EdgeMotion? = nil
         var blinkMotion: BlinkMotion? = nil
         var restScene: RestScene? = nil
@@ -45,6 +56,8 @@ final class Preferences: ObservableObject {
         rules = ReminderSchedule(rules: stored?.rules ?? [:]).rules
         excluded = stored?.excluded ?? []
         autoStart = stored?.autoStart ?? false
+        pauseForFullScreen = stored?.pauseForFullScreen ?? true
+        showMenuBarProgress = stored?.showMenuBarProgress ?? false
         edgeMotion = stored?.edgeMotion ?? .rotate
         blinkMotion = stored?.blinkMotion ?? .rotate
         restScene = stored?.restScene ?? .rotate
@@ -54,6 +67,7 @@ final class Preferences: ObservableObject {
 
     private func save() {
         let stored = Stored(rules: rules, excluded: excluded, autoStart: autoStart,
+                            pauseForFullScreen: pauseForFullScreen, showMenuBarProgress: showMenuBarProgress,
                             edgeMotion: edgeMotion, blinkMotion: blinkMotion, restScene: restScene, language: language)
         if let data = try? JSONEncoder().encode(stored) { defaults?.set(data, forKey: Self.key) }
     }
@@ -76,18 +90,21 @@ final class Preferences: ObservableObject {
         let migrated = Preferences(defaults: fresh, previousDomain: previous)
         guard migrated.rules[.look] == rule,
               migrated.rules[.blink] == ReminderRule(minutes: 10),
-              migrated.excluded == excluded, migrated.autoStart,
+              migrated.excluded == excluded, migrated.autoStart, migrated.pauseForFullScreen, !migrated.showMenuBarProgress,
               fresh.data(forKey: key) != nil,
               legacy.data(forKey: previousKey) == encoded else { return false }
 
         guard migrated.edgeMotion == .rotate, migrated.blinkMotion == .rotate, migrated.restScene == .rotate, migrated.language == .system else { return false }
         migrated.autoStart = false
+        migrated.pauseForFullScreen = false
+        migrated.showMenuBarProgress = true
         migrated.edgeMotion = .peek
         migrated.blinkMotion = .sway
         migrated.restScene = .shore
         migrated.language = .english
         let reopened = Preferences(defaults: fresh, previousDomain: previous)
-        return !reopened.autoStart && reopened.rules[.look] == rule && reopened.excluded == excluded
+        return !reopened.autoStart && !reopened.pauseForFullScreen && reopened.showMenuBarProgress
+            && reopened.rules[.look] == rule && reopened.excluded == excluded
             && reopened.edgeMotion == .peek && reopened.blinkMotion == .sway && reopened.restScene == .shore && reopened.language == .english
     }
     #endif
@@ -124,6 +141,7 @@ struct SettingsView: View {
                     }
                     .padding(.leading, 30)
                 }
+                menuBarProgressRow
             } footer: {
                 if let message = loginAtStartup.message {
                     Text(message)
@@ -155,6 +173,12 @@ struct SettingsView: View {
                             .frame(width: 44, alignment: .trailing)
                     }
                     .frame(minHeight: 24)
+                }
+
+                row(Copy.text("全屏时暂停提醒", "Pause reminders in full screen"), icon: "arrow.up.left.and.arrow.down.right") {
+                    Toggle(Copy.text("全屏时暂停提醒", "Pause reminders in full screen"), isOn: $preferences.pauseForFullScreen)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
                 }
 
                 row(Copy.text("自动开始休息", "Start breaks automatically"), icon: "timer") {
@@ -197,7 +221,11 @@ struct SettingsView: View {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(preferences.excluded) { app in
-                        row(app.name, icon: "app") {
+                        HStack(spacing: 8) {
+                            ExcludedAppIcon(app: app)
+                            Text(app.name)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 12)
                             Button {
                                 preferences.excluded = preferences.excluded.filter { $0.id != app.id }
                             } label: {
@@ -206,6 +234,7 @@ struct SettingsView: View {
                             .buttonStyle(.borderless)
                             .accessibilityLabel(Copy.text("移除 \(app.name)", "Remove \(app.name)"))
                         }
+                        .frame(minHeight: 24)
                     }
                     Button(action: addApp) {
                         Label(Copy.text("添加应用…", "Add App…"), systemImage: "plus")
@@ -226,14 +255,47 @@ struct SettingsView: View {
         .frame(minWidth: 480, idealWidth: 510, minHeight: 425, idealHeight: 654)
     }
 
+    private var menuBarProgressRow: some View {
+        let title = Copy.text("菜单栏休息进度", "Break progress in menu bar")
+        let detail = Copy.text("狐狸随下一次远眺或站立的倒计时填色。", "The fox fills as your next eye or standing break approaches.")
+        return row(title, detail: detail) {
+            Image(nsImage: StatusIcon.image(accessibilityLabel: "", fill: 0.5))
+                .renderingMode(.template)
+                .foregroundStyle(.primary)
+        } content: {
+            Toggle(title, isOn: $preferences.showMenuBarProgress)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .accessibilityHint(detail)
+        }
+    }
+
     private func row<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 8) {
+        row(title) {
             Image(systemName: icon)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.secondary)
+        } content: {
+            content()
+        }
+    }
+
+    private func row<Symbol: View, Content: View>(_ title: String, detail: String? = nil,
+                                                  @ViewBuilder symbol: () -> Symbol,
+                                                  @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            symbol()
                 .frame(width: 22, height: 22)
                 .accessibilityHidden(true)
-            Text(title).lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).fixedSize(horizontal: false, vertical: true)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Spacer(minLength: 12)
             content()
         }
@@ -246,5 +308,29 @@ struct SettingsView: View {
         } set: { value in
             preferences.rules[reminder, default: ReminderRule(minutes: reminder.defaultMinutes)][keyPath: keyPath] = value
         }
+    }
+}
+
+
+private struct ExcludedAppIcon: View {
+    let app: ExcludedApp
+    @State private var icon: NSImage?
+
+    var body: some View {
+        Group {
+            if let icon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+            } else {
+                Image(systemName: "app")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
+        .task(id: app) { icon = app.applicationIcon }
     }
 }

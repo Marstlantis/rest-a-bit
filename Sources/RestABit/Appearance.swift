@@ -54,27 +54,27 @@ extension Reminder {
 
     var nudge: String {
         switch self {
-        case .look: Copy.text("抬头看远处嘛", "Look into the distance")
-        case .water: Copy.text("该喝水啦～", "Time for a sip")
-        case .stand: Copy.text("起来走两步嘛", "Let’s take a few steps")
-        case .blink: Copy.text("眨两下嘛", "Blink twice")
+        case .look: Copy.text("看哈远处嘛", "Look into the distance")
+        case .water: Copy.text("该喝水啦～", "Have a sip")
+        case .stand: Copy.text("站起来休息哈嘛", "Stand up for a bit")
+        case .blink: Copy.text("眨两哈嘛", "Blink twice")
         }
     }
 
     var restTitle: String {
         switch self {
-        case .look: Copy.text("看向屏幕外的远处", "Look into the distance")
-        case .stand: Copy.text("站起来走几步", "Take a few steps")
+        case .look: Copy.text("看哈屏幕外的远处嘛", "Look into the distance")
+        case .stand: Copy.text("站起来休息哈嘛", "Stand up for a bit")
         case .water, .blink: nudge
         }
     }
 
     var aside: String {
         switch self {
-        case .look: Copy.text("也可以看看远处", "Look into the distance")
+        case .look: Copy.text("也看哈远处嘛", "Look into the distance")
         case .water: Copy.text("也可以喝几口水", "Have a sip of water")
         case .stand: Copy.text("也可以起来走几步", "Stand up and stretch")
-        case .blink: Copy.text("轻轻眨两下", "Blink twice")
+        case .blink: Copy.text("眨两哈嘛", "Blink twice")
         }
     }
 }
@@ -134,11 +134,19 @@ struct NudgeCard: View {
     let confirm: () -> Void
     let deferBreak: () -> Void
 
+    var arrowInsets: CGSize {
+        switch edge {
+        case .left, .right: CGSize(width: Landing.Callout.arrowDepth, height: 0)
+        case .top, .bottom: CGSize(width: 0, height: Landing.Callout.arrowDepth)
+        case nil: .zero
+        }
+    }
+
     private var palette: Palette { Palette(dark: colorScheme == .dark) }
     private var canStartBreak: Bool { !preview && !dismissOnly && batch.main.usesEdgeEntrance }
     private var title: String {
         if batch.main == .stand, batch.included.contains(.look) {
-            return Copy.text("起来走走，看看远处嘛", "Stand up and look away")
+            return Copy.text("站起来休息哈，也看哈远处", "Stand up and look away")
         }
         return batch.main.nudge
     }
@@ -160,36 +168,36 @@ struct NudgeCard: View {
         let bubble = SpeechBubble(edge: edge)
         Group {
             if batch.main == .water {
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     ReminderGlyph(reminder: .water, size: 13)
                         .foregroundStyle(palette.accent)
-                    headline.lineLimit(1)
-                    Spacer(minLength: 8)
-                    primaryAction
+                    headline
+                    primaryAction.padding(.leading, 4)
                 }
+                .fixedSize(horizontal: true, vertical: true)
             } else {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 5) {
                         if edge == nil {
                             ReminderGlyph(reminder: batch.main, size: 13).foregroundStyle(palette.accent)
                         }
                         headline.lineLimit(2)
                     }
-                    HStack(spacing: 6) {
-                        Spacer(minLength: 0)
+                    HStack(spacing: 8) {
+                        primaryAction
                         if canStartBreak {
-                            Button(Copy.text("稍后 5 分钟", "In 5 min"), action: deferBreak)
+                            Button(Copy.text("5 分钟后", "In 5 min"), action: deferBreak)
                                 .buttonStyle(CardActionStyle(palette: palette, emphasis: false))
                         }
-                        primaryAction
                     }
                 }
+                .fixedSize(horizontal: true, vertical: true)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(edge == .left ? .leading : .trailing, edge == .left || edge == .right ? 7 : 0)
-        .padding(edge == .top ? .top : .bottom, edge == .top || edge == .bottom ? 7 : 0)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, batch.main == .water ? 12 : 13)
+        .padding(.vertical, batch.main == .water ? 8 : 10)
+        .padding(edge == .left ? .leading : .trailing, arrowInsets.width)
+        .padding(edge == .top ? .top : .bottom, arrowInsets.height)
         .background {
             bubble.fill(palette.paper)
                 .overlay { bubble.stroke(palette.hairline, lineWidth: 1) }
@@ -202,7 +210,7 @@ private struct SpeechBubble: Shape {
 
     func path(in rect: CGRect) -> Path {
         let margin: CGFloat = 1.5
-        let tail: CGFloat = 7
+        let tail = Landing.Callout.arrowDepth
         let r: CGFloat = 14
         let left = rect.minX + margin + (edge == .left ? tail : 0)
         let right = rect.maxX - margin - (edge == .right ? tail : 0)
@@ -245,12 +253,13 @@ struct CardActionStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 11, weight: .semibold))
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 10)
             .frame(minHeight: 27)
-            .background(emphasis ? palette.accent : .clear, in: Capsule())
-            .foregroundStyle(emphasis ? (palette.dark ? Color.black : Color.white) : palette.quiet)
+            .background(emphasis ? palette.accent.opacity(palette.dark ? 0.21 : 0.12) : .clear,
+                        in: RoundedRectangle(cornerRadius: 7))
+            .foregroundStyle(emphasis ? palette.accent : palette.quiet)
             .opacity(configuration.isPressed ? 0.72 : 1)
-            .contentShape(Capsule())
+            .contentShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -258,7 +267,7 @@ struct RestScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     let batch: ReminderBatch
     let timing: RestTiming
-    let fox: FoxArt?
+    let fox: [FoxPose: CGImage]
     let illustration: CGImage?
     let motion: Bool
     let close: () -> Void
@@ -341,7 +350,7 @@ struct RestScreen: View {
 }
 
 private struct FoxProgressTrack: View {
-    let fox: FoxArt?
+    let fox: [FoxPose: CGImage]
     let palette: Palette
     let progress: Double
     let motion: Bool
@@ -357,7 +366,7 @@ private struct FoxProgressTrack: View {
                 Capsule().fill(palette.hairline).frame(height: 2)
                 Capsule().fill(palette.accent.opacity(0.72)).frame(width: width * progress, height: 2)
                 let pose = motion ? Self.gait[frame % Self.gait.count] : .stand
-                if let image = fox?[pose] {
+                if let image = fox[pose] {
                     Image(decorative: image, scale: 2)
                         .resizable().scaledToFit()
                         .frame(width: 42, height: 32)

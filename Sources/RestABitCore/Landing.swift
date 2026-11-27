@@ -47,11 +47,13 @@ public struct Landing: Equatable {
     public var card: CGRect { callout.frame }
 
     public struct Callout: Equatable {
+        public static let arrowDepth: CGFloat = 7
+
         public let frame: CGRect
         public let arrow: ScreenEdge
     }
 
-    private static let cardWidth: CGFloat = 258
+    private static let cardWidth: CGFloat = 238
     private static let cardHeight: CGFloat = 84
     private static let inset: CGFloat = 12
 
@@ -74,9 +76,9 @@ public struct Landing: Equatable {
     }
 
     public static func callout(near stop: CGPoint, in safe: CGRect, pointer: CGPoint,
-                               preferred: ScreenEdge, compact: Bool = false) -> Callout? {
-        let width: CGFloat = compact ? 214 : cardWidth
-        let height: CGFloat = compact ? 54 : cardHeight
+                               preferred: ScreenEdge, compact: Bool = false,
+                               fittedBody: CGSize? = nil) -> Callout? {
+        let body = fittedBody ?? CGSize(width: compact ? 214 : cardWidth, height: compact ? 54 : cardHeight)
         let opposite: ScreenEdge
         switch preferred {
         case .left: opposite = .right
@@ -86,6 +88,10 @@ public struct Landing: Equatable {
         }
         let order = [preferred, opposite] + ScreenEdge.allCases.filter { $0 != preferred && $0 != opposite }
         for arrow in order {
+            let horizontalArrow = arrow == .left || arrow == .right
+            let arrowDepth = fittedBody == nil ? 0 : Callout.arrowDepth
+            let width = body.width + (horizontalArrow ? arrowDepth : 0)
+            let height = body.height + (horizontalArrow ? 0 : arrowDepth)
             let x: CGFloat
             let y: CGFloat
             switch arrow {

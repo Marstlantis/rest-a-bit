@@ -28,7 +28,8 @@ final class BlinkPresentation {
         scene = NSView(frame: CGRect(origin: .zero, size: size))
         scene.wantsLayer = true
         if let art {
-            let player = FoxPlayer(frame: CGRect(x: 0, y: 39, width: size.width, height: size.height - 39), art: art)
+            let player = FoxPlayer(frame: CGRect(x: 0, y: 39, width: size.width, height: size.height - 39),
+                                   art: art, backingScale: screen.backingScaleFactor)
             scene.addSubview(player)
             self.player = player
             clip = motion && art.hasBlinkSequence ? FoxClip.blink(in: size.width, motion: style) : nil
@@ -70,7 +71,12 @@ final class BlinkPresentation {
         badge.rootView = BlinkBadge()
     }
 
-    func close() { panel.orderOut(nil) }
+    func close() {
+        panel.close()
+        scene.layer?.removeAllAnimations()
+        player?.clear()
+        panel.contentView = nil
+    }
 
     #if DEBUG
     var passesPointerThrough: Bool { panel.ignoresMouseEvents }

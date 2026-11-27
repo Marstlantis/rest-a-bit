@@ -3,11 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 DIR="$(mktemp -d "$ROOT/.build/ui-probe.XXXXXX")"
-mkdir -p "$DIR/Fixture.app/Contents/MacOS" "$ROOT/.build/cache/module"
+mkdir -p "$DIR/Fixture.app/Contents/MacOS" "$DIR/Fixture.app/Contents/Resources" "$ROOT/.build/cache/module"
+cp "$ROOT/Support/RestABit.icns" "$DIR/Fixture.app/Contents/Resources/Fixture.icns"
 CACHE="$ROOT/.build/cache/module"
 CLANG_MODULE_CACHE_PATH="$CACHE" swiftc -parse-as-library -module-cache-path "$CACHE" script/FocusFixture.swift     -o "$DIR/Fixture.app/Contents/MacOS/Fixture"
 FIXTURE_ID="local.restabit.fixture.$(uuidgen | tr '[:upper:]' '[:lower:]')"
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $FIXTURE_ID"     -c 'Add :CFBundleExecutable string Fixture' -c 'Add :CFBundlePackageType string APPL'     -c 'Add :CFBundleName string Rest a Bit Fixture' "$DIR/Fixture.app/Contents/Info.plist" >/dev/null
+/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $FIXTURE_ID"     -c 'Add :CFBundleExecutable string Fixture' -c 'Add :CFBundlePackageType string APPL'     -c 'Add :CFBundleName string Rest a Bit Fixture' -c 'Add :CFBundleIconFile string Fixture' "$DIR/Fixture.app/Contents/Info.plist" >/dev/null
 codesign --force --sign - "$DIR/Fixture.app"
 cleanup_fixture() {
     local process
@@ -29,7 +30,7 @@ if [[ ! -s "$DIR/fixture-ready.txt" ]]; then
 fi
 PID="$(cat "$DIR/fixture-ready.txt")"
 open -g -n "$ROOT/dist/Rest a Bit.app" --args --ui-probe "$DIR" "$PID" "$@"
-for _ in {1..295}; do
+for _ in {1..350}; do
     [[ ! -s "$DIR/result.txt" ]] || break
     sleep 0.2
 done
@@ -49,7 +50,12 @@ rg -q '^Live language chinese updated: true$' "$DIR/result.txt"
 [[ "$(rg -c 'arrived at the center and kept animation click-through: true' "$DIR/result.txt")" == 8 ]]
 [[ "$(rg -c 'slows down before stopping: true' "$DIR/result.txt")" == 8 ]]
 [[ "$(rg -c 'keeps forward heading: true' "$DIR/result.txt")" == 8 ]]
+[[ "$(rg -c 'cue fits its own content: true' "$DIR/result.txt")" == 8 ]]
+rg -q '^Combined English cue fits beside the fox: true$' "$DIR/result.txt"
 rg -q '^Excluded app appears after sheet closes without reopening settings: true$' "$DIR/result.txt"
+rg -q '^Native full-screen pause, toggle, and exit verified: true$' "$DIR/result.txt"
+rg -q '^Automatic reminder held for the excluded foreground app: true$' "$DIR/result.txt"
+rg -q '^Excluded icon and nested helper matching verified: true$' "$DIR/result.txt"
 rg -q '^Scheduled edge reminder skips overlapping blink: true$' "$DIR/result.txt"
 rg -q '^Blink stage is centered and click-through: true$' "$DIR/result.txt"
 rg -q '^Blink captured 100 frames and kept editor frontmost: true$' "$DIR/result.txt"
@@ -63,6 +69,13 @@ rg -q '^Rest illustration grove rendered: true$' "$DIR/result.txt"
 rg -q '^Dark illustration and callout rendered: true$' "$DIR/result.txt"
 rg -q '^Login item registration states verified without changing login items: true$' "$DIR/result.txt"
 rg -q '^Water scene is centered and leaves focus on the editor: true$' "$DIR/result.txt"
+rg -q '^Water cue fits its complete localized text: true$' "$DIR/result.txt"
+rg -q '^Status icon hover does not show the app name: true$' "$DIR/result.txt"
+rg -q '^Native status hover countdown, localization, pause and menu dismissal: true$' "$DIR/result.txt"
+rg -q '^Optional menu-bar progress, pause, snooze and static fallback verified: true$' "$DIR/result.txt"
+rg -q '^Enabled menu-bar progress settings rendered in dark mode: true$' "$DIR/result.txt"
+rg -q '^Closed settings rebuilds at the same position: true$' "$DIR/result.txt"
+rg -q '^English standing break rendered: true$' "$DIR/result.txt"
 rg -q '^Rest covers the screen above the menu bar: true$' "$DIR/result.txt"
 rg -q '^Rest countdown decreased with the running deadline: true' "$DIR/result.txt"
 rg -q '^Rest panel became key: true$' "$DIR/result.txt"

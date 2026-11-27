@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import RestABitCore
 
 struct WaterScene {
@@ -9,17 +8,16 @@ struct WaterScene {
     let callout: Landing.Callout
     let illustration: CGImage
 
-    init?(in screen: CGRect, pointer: CGPoint) {
+    init?(in screen: CGRect, pointer: CGPoint, backingScale: CGFloat) {
         let size = CGSize(width: 380, height: 152)
         guard screen.width >= size.width + 24, screen.height >= size.height + 24,
-              let url = Bundle.module.url(forResource: "pond", withExtension: "png", subdirectory: "Assets"),
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              let url = Bundle.module.url(forResource: "pond", withExtension: "png", subdirectory: "Assets")
         else { return nil }
         let frame = CGRect(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2,
                            width: size.width, height: size.height)
         let anchor = CGPoint(x: screen.midX, y: frame.minY + 57)
-        guard let callout = Landing.callout(near: anchor, in: screen, pointer: pointer, preferred: .top, compact: true)
+        guard let callout = Landing.callout(near: anchor, in: screen, pointer: pointer, preferred: .top, compact: true),
+              let image = ArtworkBitmap.load(url, maxPixelSize: Int(ceil(size.width * backingScale)))
         else { return nil }
         self.frame = frame
         self.cueAnchor = anchor

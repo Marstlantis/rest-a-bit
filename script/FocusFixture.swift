@@ -2,14 +2,18 @@ import AppKit
 
 // An independent, empty editor used only by the native window probe.
 @MainActor
-final class Fixture: NSObject, NSApplicationDelegate {
+final class Fixture: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var editor: NSTextView!
+    private var lastFullScreenCommand: String?
     private let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 530, height: 300),
-                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.delegate = self
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        writeFullScreenState("windowed")
         window.title = "Rest a Bit QA – Synthetic Editor"
         editor = NSTextView(frame: window.contentView!.bounds)
         editor.autoresizingMask = [.width, .height]
@@ -25,6 +29,7 @@ final class Fixture: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
+                self.processFullScreenCommand()
                 let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
                 if foreground, NSApp.keyWindow === self.window, self.window.firstResponder === self.editor {
                     try? "\(ProcessInfo.processInfo.processIdentifier)".write(
@@ -49,6 +54,28 @@ final class Fixture: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    private func processFullScreenCommand() {
+        let file = output.appendingPathComponent("fullscreen-command.txt")
+        guard let command = try? String(contentsOf: file, encoding: .utf8),
+              command != lastFullScreenCommand else { return }
+        lastFullScreenCommand = command
+        if (command == "enter") != window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+        }
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        writeFullScreenState("fullscreen")
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        writeFullScreenState("windowed")
+    }
+
+    private func writeFullScreenState(_ state: String) {
+        try? state.write(to: output.appendingPathComponent("fullscreen-state.txt"), atomically: true, encoding: .utf8)
     }
 
     private func captureReturn() {

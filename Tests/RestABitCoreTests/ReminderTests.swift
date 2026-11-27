@@ -217,6 +217,31 @@ final class ReminderTests: XCTestCase {
         XCTAssertNil(schedule.due(now: 60))
     }
 
+    func testMenuBarProgressTracksOnlyTheNextScreenBreak() {
+        var schedule = ReminderSchedule(rules: [.look: ReminderRule(minutes: 20)])
+        advance(&schedule, 0)
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 0), 0)
+        advance(&schedule, 600)
+        XCTAssertEqual(schedule.next(now: 600)?.0, .blink)
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 600), 0.5)
+        advance(&schedule, 1_200)
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 1_200), 1)
+        schedule.finish(ReminderBatch(main: .look))
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 1_200), 0)
+    }
+
+    func testMenuBarProgressUsesTheFiveMinuteSnoozeDuration() {
+        var schedule = shortSchedule()
+        advance(&schedule, 0)
+        advance(&schedule, 60)
+        schedule.snooze(ReminderBatch(main: .look), now: 60)
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 60), 0)
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 210), 0.5)
+        XCTAssertEqual(schedule.nextScreenBreakProgress(now: 360), 1)
+        schedule.update(ReminderRule(enabled: false, minutes: 1), for: .look)
+        XCTAssertNil(schedule.nextScreenBreakProgress(now: 360))
+    }
+
     private func shortSchedule() -> ReminderSchedule {
         ReminderSchedule(rules: [
             .look: ReminderRule(minutes: 1),

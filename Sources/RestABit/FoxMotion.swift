@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import QuartzCore
 import RestABitCore
 
@@ -33,7 +32,6 @@ enum FoxPose: String, CaseIterable {
 @MainActor
 final class FoxArt {
     private var sources: [FoxPose: URL]
-    private var images: [FoxPose: CGImage] = [:]
 
     init?() {
         var sources: [FoxPose: URL] = [:]
@@ -65,24 +63,22 @@ final class FoxArt {
     }
     #endif
 
-    func prepare(_ poses: [FoxPose]) {
-        for pose in Set(poses) { _ = self[pose] }
+    func frames(for poses: [FoxPose], maxPixelSize: Int?) -> [FoxPose: CGImage] {
+        var frames: [FoxPose: CGImage] = [:]
+        for pose in Set(poses) {
+            frames[pose] = frame(for: pose, maxPixelSize: maxPixelSize)
+        }
+        return frames
     }
 
-    subscript(pose: FoxPose) -> CGImage? {
-        if let image = images[pose] { return image }
+    func frame(for pose: FoxPose, maxPixelSize: Int?) -> CGImage? {
         if let url = sources[pose] {
-            if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-               let image = CGImageSourceCreateImageAtIndex(source, 0, [
-                    kCGImageSourceShouldCache: true,
-                    kCGImageSourceShouldCacheImmediately: true
-               ] as CFDictionary) {
-                images[pose] = image
+            if let image = ArtworkBitmap.load(url, maxPixelSize: maxPixelSize) {
                 return image
             }
             sources[pose] = nil
         }
-        return pose.substitute.flatMap { self[$0] }
+        return pose.substitute.flatMap { frame(for: $0, maxPixelSize: maxPixelSize) }
     }
 }
 
@@ -295,9 +291,13 @@ final class FoxPlayer: NSView {
     private let wrapper = CALayer()
     private let sprite = CALayer()
     private let art: FoxArt
+    private let maxPixelSize: Int?
+    private var preparedFrames: [FoxPose: CGImage] = [:]
 
-    init(frame: CGRect, art: FoxArt) {
+    init(frame: CGRect, art: FoxArt, backingScale: CGFloat) {
         self.art = art
+        // Keep the full drawing at Retina scale for tilted poses.
+        maxPixelSize = backingScale < 2 ? Int(ceil(172 * backingScale)) : nil
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -314,22 +314,27 @@ final class FoxPlayer: NSView {
 
     func prepare(_ clip: FoxClip) {
         guard let firstPoint = clip.points.first, let firstPose = clip.poses.first else { return }
-        art.prepare(clip.poses.map(\.frame))
-        place(firstPose.frame, at: firstPoint.position, mirrored: clip.mirrored,
+        preparedFrames = art.frames(for: clip.poses.map(\.frame), maxPixelSize: maxPixelSize)
+        place(preparedFrames[firstPose.frame], at: firstPoint.position, mirrored: clip.mirrored,
               tilt: clip.angles.first.map { CGFloat($0.angle) } ?? 0)
     }
 
-    func place(_ pose: FoxPose, at point: CGPoint, mirrored: Bool = false, tilt: CGFloat = 0) {
+    func place(_ pose: FoxPose, at point: CGPoint) {
+        place(art.frame(for: pose, maxPixelSize: maxPixelSize), at: point, mirrored: false, tilt: 0)
+    }
+
+    private func place(_ image: CGImage?, at point: CGPoint, mirrored: Bool, tilt: CGFloat) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         wrapper.setAffineTransform(CGAffineTransform(scaleX: mirrored ? -1 : 1, y: 1))
         wrapper.position = position(point, mirrored: mirrored)
         sprite.setAffineTransform(CGAffineTransform(rotationAngle: tilt))
-        sprite.contents = art[pose]
+        sprite.contents = image
         CATransaction.commit()
     }
 
     func play(_ clip: FoxClip) {
+        defer { preparedFrames.removeAll() }
         guard let finalPoint = clip.points.last, let finalPose = clip.poses.last else { return }
         let flip = clip.mirrored ? -1.0 : 1.0
 
@@ -340,7 +345,7 @@ final class FoxPlayer: NSView {
         path.duration = clip.duration
 
         let drawings = CAKeyframeAnimation(keyPath: "contents")
-        drawings.values = clip.poses.compactMap { art[$0.frame] }
+        drawings.values = clip.poses.compactMap { preparedFrames[$0.frame] }
         drawings.keyTimes = clip.poses.map { NSNumber(value: $0.time / clip.duration) } + [1]
         drawings.calculationMode = .discrete
         drawings.duration = clip.duration
@@ -349,7 +354,7 @@ final class FoxPlayer: NSView {
         wrapper.setAffineTransform(CGAffineTransform(scaleX: flip, y: 1))
         wrapper.position = position(finalPoint.position, mirrored: clip.mirrored)
         sprite.setAffineTransform(.identity)
-        sprite.contents = art[finalPose.frame]
+        sprite.contents = preparedFrames[finalPose.frame]
         wrapper.add(path, forKey: "entrance.path")
         if drawings.values?.count == clip.poses.count {
             sprite.add(drawings, forKey: "entrance.drawings")
@@ -363,6 +368,23 @@ final class FoxPlayer: NSView {
         }
         CATransaction.commit()
     }
+
+    func clear() {
+        preparedFrames.removeAll()
+        wrapper.removeAllAnimations()
+        sprite.removeAllAnimations()
+        sprite.contents = nil
+    }
+
+    func settle(at point: CGPoint) {
+        wrapper.removeAllAnimations()
+        sprite.removeAllAnimations()
+        wrapper.position = point
+    }
+
+    #if DEBUG
+    var settledPosition: CGPoint { wrapper.position }
+    #endif
 
     private func position(_ point: CGPoint, mirrored: Bool) -> CGPoint {
         CGPoint(x: mirrored ? bounds.width - point.x : point.x, y: point.y)

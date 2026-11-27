@@ -1,7 +1,9 @@
 import AppKit
 
 enum StatusIcon {
-    static func image(accessibilityLabel: String) -> NSImage {
+    static let fillSteps = 28
+
+    static func image(accessibilityLabel: String, fill: CGFloat? = nil) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.saveGState()
@@ -26,9 +28,19 @@ enum StatusIcon {
                           control1: CGPoint(x: 15, y: 5), control2: CGPoint(x: 11.2, y: 2.2))
             face.closeSubpath()
 
-            context.setFillColor(NSColor.black.cgColor)
+            let progress = fill.map { min(1, max(0, $0)) } ?? 1
+            context.setFillColor(NSColor.black.withAlphaComponent(progress == 1 ? 1 : 0.42).cgColor)
             context.addPath(face)
             context.fillPath()
+            if progress > 0 && progress < 1 {
+                let bounds = face.boundingBoxOfPath
+                context.saveGState()
+                context.clip(to: CGRect(x: 0, y: 0, width: 18, height: bounds.minY + bounds.height * progress))
+                context.setFillColor(NSColor.black.cgColor)
+                context.addPath(face)
+                context.fillPath()
+                context.restoreGState()
+            }
 
             // The expression is cut out so wallpaper shows through the system-tinted template.
             context.setBlendMode(.clear)

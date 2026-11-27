@@ -5,13 +5,15 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum ProbeCapture {
-    static func stage(_ view: NSView, to file: URL) -> Bool {
+    static func stage(_ view: NSView, in canvas: CGRect? = nil, to file: URL) -> Bool {
         guard let model = view.layer else { return false }
-        let size = view.bounds.size
+        let canvas = canvas ?? view.bounds
+        let size = canvas.size
         guard let context = CGContext(data: nil, width: Int(size.width * 2), height: Int(size.height * 2),
                                       bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
         context.scaleBy(x: 2, y: 2)
+        context.translateBy(x: -canvas.minX, y: -canvas.minY)
         (model.presentation() ?? model).render(in: context)
         guard let image = context.makeImage(),
               let writer = CGImageDestinationCreateWithURL(file as CFURL, UTType.png.identifier as CFString, 1, nil)

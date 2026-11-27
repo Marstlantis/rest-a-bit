@@ -17,17 +17,21 @@ enum RestABitApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private enum Block: Hashable { case sleep, displaySleep, lock, inactiveSession }
 
     private let log = Logger(subsystem: "local.restabit.app", category: "reminder")
     private let preferences: Preferences
     private let loginAtStartup = LoginAtStartup()
+    private let foregroundProtection = ForegroundProtection()
     private var schedule: ReminderSchedule
     private var art: FoxArt?
     private var item: NSStatusItem?
+    private var statusMenuIsOpen = false
+    private var statusFillStep: Int?
     private let menu = NSMenu()
     private var settings: NSWindow?
+    private var settingsFrame: CGRect?
     private var timer: Timer?
     private var blocks: Set<Block> = []
     private var nextPresentation: Double = 0
@@ -47,7 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     override init() {
         #if DEBUG
-        testing = ProcessInfo.processInfo.arguments.contains("--ui-probe")
+        let arguments = ProcessInfo.processInfo.arguments
+        testing = arguments.contains("--ui-probe") || arguments.contains("--memory-probe")
         #endif
         preferences = Preferences(defaults: testing ? nil : .standard)
         schedule = ReminderSchedule(rules: preferences.rules)
@@ -61,8 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         nudge == nil && blink == nil && rest == nil && retreat == nil && fadingRest == nil && blocks.isEmpty
     }
     private var isExcluded: Bool {
-        guard let id = workspace.frontmostApplication?.bundleIdentifier else { return false }
-        return preferences.excluded.contains { $0.id == id }
+        foregroundProtection.isExcluded(workspace.frontmostApplication, exclusions: preferences.excluded)
+    }
+
+    private func pauseReason(for application: NSRunningApplication? = nil,
+                             refresh: Bool = false) -> ForegroundProtection.Reason? {
+        foregroundProtection.reason(for: application ?? workspace.frontmostApplication,
+                                    exclusions: preferences.excluded,
+                                    pauseForFullScreen: preferences.pauseForFullScreen, now: now, refresh: refresh)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -87,30 +98,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tick()
 
         #if DEBUG
-        if testing { runProbe() }
+        if let probe = MemoryProbe.configuration {
+            runMemoryProbe(probe.output, cycles: probe.cycles)
+        } else if testing {
+            runProbe()
+        }
         #endif
     }
 
-    private func tick() {
+    private func tick(activatedApplication: NSRunningApplication? = nil) {
         guard blocks.isEmpty else { return }
         let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
                                                           eventType: CGEventType(rawValue: UInt32.max)!)
         let time = now
-        schedule.advance(to: time, idle: idle, excluded: isExcluded, resting: rest != nil)
+        let reason = pauseReason(for: activatedApplication)
+        schedule.advance(to: time, idle: idle, excluded: reason != nil, resting: rest != nil)
         let scheduledNudge = nudge.map { !$0.preview && !$0.demo } ?? false
-        if idle >= ReminderSchedule.idlePauseAfter && (scheduledNudge || blink?.preview == false) {
+        if (reason != nil || idle >= ReminderSchedule.idlePauseAfter),
+           scheduledNudge || blink?.preview == false {
             cancelPresentation(cooldown: 0)
         }
-        guard presentationAvailable,
+        let clockSuspended = reason != nil || schedule.pausedUntil != nil ||
+            idle >= ReminderSchedule.idlePauseAfter || (rest != nil && pendingCommit == nil)
+        updateStatusIcon(at: time, suspended: clockSuspended)
+        updateStatusHover(at: time, suspended: clockSuspended)
+        guard reason == nil, presentationAvailable,
               time >= nextPresentation,
               let batch = schedule.due(now: time) else { return }
         show(batch: batch)
     }
 
     private func updateStatusLabel() {
-        item?.button?.image = StatusIcon.image(accessibilityLabel: Copy.name)
-        item?.button?.toolTip = Copy.name
         item?.button?.setAccessibilityLabel(Copy.name)
+        updateStatusIcon(at: now, suspended: true, force: true)
+    }
+
+    private func updateStatusHover(at time: TimeInterval, suspended: Bool) {
+        guard !statusMenuIsOpen, blocks.isEmpty, let button = item?.button else { return }
+        let title = statusHoverTitle(at: time, suspended: suspended)
+        // Keep AppKit's tooltip registration intact while the text is the same.
+        if button.toolTip != title { button.toolTip = title }
+    }
+
+    private func statusHoverTitle(at time: TimeInterval, suspended: Bool) -> String {
+        if rest != nil { return Copy.text("休息中", "On a break") }
+        if suspended {
+            return Copy.text("提醒已暂停", "Reminders paused")
+        }
+        guard let (reminder, seconds) = schedule.nextScreenBreak(now: time) else {
+            return Copy.text("休息提醒已关闭", "Break reminders off")
+        }
+        let action = reminder == .stand ? "站起来" : "远眺"
+        let actionEnglish = reminder == .stand ? "Stand up" : "Look away"
+        if seconds == 0 { return Copy.text("该\(action)啦", "\(actionEnglish) now") }
+        if seconds < 60 { return Copy.text("不到 1 分钟后\(action)", "\(actionEnglish) in under 1 min") }
+        let minutes = Int(ceil(seconds / 60))
+        return Copy.text("\(minutes) 分钟后\(action)", "\(actionEnglish) in \(minutes) min")
+    }
+
+    private func updateStatusIcon(at time: TimeInterval, suspended: Bool, force: Bool = false) {
+        guard let button = item?.button else { return }
+        let step: Int?
+        if preferences.showMenuBarProgress, let progress = schedule.nextScreenBreakProgress(now: time) {
+            let showingNudge = nudge.map { !$0.preview && !$0.demo && $0.batch.main.usesEdgeEntrance } ?? false
+            let showingRest = rest != nil && pendingCommit != nil
+            let fill = showingNudge || showingRest ? 1 : progress
+            let current = Int((fill * Double(StatusIcon.fillSteps)).rounded(.down))
+            step = suspended ? statusFillStep ?? current : current
+        } else {
+            step = nil
+        }
+        guard force || statusFillStep != step || button.image == nil else { return }
+        statusFillStep = step
+        let fill = step.map { CGFloat($0) / CGFloat(StatusIcon.fillSteps) }
+        button.image = StatusIcon.image(accessibilityLabel: Copy.name, fill: fill)
     }
 
     private func applyPreferences() {
@@ -127,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }?.contains { schedule.rules[$0] != preferences.rules[$0] } ?? false
         let affectedBlink = blink?.preview == false && schedule.rules[.blink] != preferences.rules[.blink]
         for (kind, rule) in preferences.rules { schedule.update(rule, for: kind) }
-        if affectedNudge || affectedBlink || ((nudge != nil || blink != nil) && isExcluded) {
+        if affectedNudge || affectedBlink {
             cancelPresentation()
         }
         tick()
@@ -137,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func show(batch: ReminderBatch, preview: Bool = false, forcedEdge: EntranceOrigin? = nil,
                       demo: Bool = false, dismissOnly: Bool = false,
                       preferredScreen: NSScreen? = nil, samplePointer: CGPoint? = nil) -> Bool {
-        guard presentationAvailable else { return false }
+        guard presentationAvailable, preview || demo || pauseReason(refresh: true) == nil else { return false }
         let pointer = samplePointer ?? NSEvent.mouseLocation
         guard let screen = preferredScreen ?? NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? NSScreen.main else { return false }
         if batch.main == .blink {
@@ -157,7 +218,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let motion = !reducedMotion && !dismissOnly && batch.main.usesEdgeEntrance && art != nil
         let landing = motion ? Landing.choose(in: safe, pointer: pointer, previous: previousEdge,
                                               force: forcedEdge, using: &random) : nil
-        let water = batch.main == .water && art != nil ? WaterScene(in: safe, pointer: pointer) : nil
+        let water = batch.main == .water && art != nil
+            ? WaterScene(in: safe, pointer: pointer, backingScale: screen.backingScaleFactor) : nil
         let centerCard = (batch.main.usesEdgeEntrance || batch.main == .water)
             ? Landing.callout(near: CGPoint(x: safe.midX, y: safe.midY), in: safe,
                               pointer: pointer, preferred: .left, compact: batch.main == .water)?.frame
@@ -203,10 +265,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func reveal(_ presentation: NudgePresentation) {
+        if !presentation.preview, !presentation.demo, pauseReason(refresh: true) != nil {
+            cancelPresentation(cooldown: 0)
+            return
+        }
         presentation.showCard(animated: !reducedMotion && presentation.entranceDuration > 0)
         let seconds: Double = presentation.preview ? 6 : (presentation.batch.main == .water ? 12 : 10)
         after(seconds) { [weak self, weak presentation] in
             guard let self, let presentation, nudge === presentation else { return }
+            if !presentation.preview, !presentation.demo, pauseReason(refresh: true) != nil {
+                cancelPresentation(cooldown: 0)
+                return
+            }
             if !presentation.preview, !presentation.dismissOnly, presentation.batch.main != .water,
                preferences.autoStart || presentation.demo,
                !isExcluded, presentation.frontmostPID == workspace.frontmostApplication?.processIdentifier {
@@ -220,6 +290,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func confirmNudge() {
         guard let nudge else { return }
+        if !nudge.preview, !nudge.demo, pauseReason(refresh: true) != nil {
+            cancelPresentation(cooldown: 0)
+            return
+        }
         let batch = nudge.batch
         if nudge.preview || nudge.dismissOnly || batch.main == .water {
             if !nudge.preview && !nudge.demo { schedule.finish(batch) }
@@ -235,6 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let nudge, !nudge.preview, !nudge.dismissOnly, nudge.batch.main != .water else { return }
         if !nudge.demo { schedule.snooze(nudge.batch, now: now) }
         dismissNudge(animated: true)
+        updateStatusIcon(at: now, suspended: false)
     }
 
     private func dismissNudge(animated: Bool) {
@@ -286,6 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                             scene: scene, motion: !reducedMotion, ended: { [weak self] in self?.endRest(animated: false) })
         rest = presentation
         pendingCommit = recordReminder ? batch : nil
+        updateStatusIcon(at: now, suspended: !recordReminder)
         presentation.show()
         let endsAt = presentation.timing.endsAt
         after(0.10) { [weak self, weak presentation] in
@@ -314,6 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             schedule.noteRestEnded(now: now)
         }
         pendingCommit = nil
+        updateStatusIcon(at: now, suspended: !countBreak || schedule.pausedUntil != nil)
         schedule.advance(to: now, idle: 0, excluded: isExcluded, resting: true)
         if animated {
             fadingRest = presented
@@ -374,18 +451,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettings() {
         loginAtStartup.refresh()
         if settings == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: 722),
+            let screenHeight = NSScreen.main?.visibleFrame.height ?? 820
+            let height = max(425, min(790, screenHeight - 42))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: height),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                   backing: .buffered, defer: false)
             window.title = Copy.settingsTitle
             window.isReleasedWhenClosed = false
+            window.delegate = self
             window.contentView = NSHostingView(rootView: SettingsView(preferences: preferences, loginAtStartup: loginAtStartup,
                                                                        addApp: { [weak self] in self?.addExcludedApp() }))
-            window.center()
+            if let settingsFrame, NSScreen.screens.contains(where: { $0.visibleFrame.intersects(settingsFrame) }) {
+                window.setFrame(settingsFrame, display: false)
+            } else {
+                window.center()
+            }
             settings = window
         }
         NSApp.activate(ignoringOtherApps: true)
         settings?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === settings else { return }
+        settingsFrame = window.frame
+        settings = nil
     }
 
     private func addExcludedApp() {
@@ -409,23 +499,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func applyExcludedApp(_ url: URL) {
-        guard let bundle = Bundle(url: url), let id = bundle.bundleIdentifier,
-              !preferences.excluded.contains(where: { $0.id == id }) else { return }
+        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        guard let bundle = Bundle(url: canonical), let id = bundle.bundleIdentifier else { return }
         let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
-            ?? url.deletingPathExtension().lastPathComponent
-        preferences.excluded = preferences.excluded + [ExcludedApp(id: id, name: name)]
+            ?? canonical.deletingPathExtension().lastPathComponent
+        let app = ExcludedApp(id: id, name: name, bundlePath: canonical.path)
+        if let index = preferences.excluded.firstIndex(where: { $0.id.caseInsensitiveCompare(id) == .orderedSame }) {
+            if preferences.excluded[index] != app {
+                preferences.excluded[index] = app
+            }
+        } else {
+            preferences.excluded = preferences.excluded + [app]
+        }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === self.menu else { return }
         menu.removeAllItems()
+        let protection = pauseReason()
         let status: String
         if let paused = schedule.pausedUntil {
             let minutes = max(1, Int(ceil((paused - now) / 60)))
             status = Copy.text("已暂停 · \(minutes) 分钟", "Paused · \(minutes) min")
-        } else if isExcluded {
-            status = Copy.text("当前应用已排除", "Current app is excluded")
+        } else if protection == .excluded {
+            status = Copy.text("已为当前应用暂停", "Paused for current app")
+        } else if protection == .fullScreen {
+            status = Copy.text("全屏中，提醒已暂停", "Paused in full screen")
         } else if let (reminder, time) = schedule.next(now: now) {
             let minutes = max(0, Int(ceil(time / 60)))
             status = Copy.text("下次提醒 · \(reminder.name) · \(minutes) 分钟", "Next · \(reminder.name) · \(minutes) min")
@@ -433,7 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = Copy.text("提醒已关闭", "Reminders off")
         }
         menu.addItem(withTitle: status, action: nil, keyEquivalent: "")
-        if schedule.pausedUntil == nil, !isExcluded, let next = schedule.next(now: now), !next.0.usesEdgeEntrance,
+        if schedule.pausedUntil == nil, protection == nil, let next = schedule.next(now: now), !next.0.usesEdgeEntrance,
            let (reminder, time) = schedule.nextScreenBreak(now: now) {
             let minutes = max(0, Int(ceil(time / 60)))
             menu.addItem(withTitle: Copy.text("下次休息 · \(reminder.name) · \(minutes) 分钟",
@@ -481,6 +581,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(Copy.quitTitle, #selector(quit), key: "q")
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        statusMenuIsOpen = true
+        item?.button?.toolTip = nil
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        if menu === self.menu { statusMenuIsOpen = false }
+    }
+
     private func add(_ title: String, _ action: Selector, key: String = "") {
         menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = self
     }
@@ -526,6 +636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func systemChanged(_ note: Notification) {
+        item?.button?.toolTip = nil
         switch note.name {
         case NSWorkspace.willSleepNotification: blocks.insert(.sleep)
         case NSWorkspace.didWakeNotification: blocks.remove(.sleep)
@@ -536,9 +647,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case Notification.Name("com.apple.screenIsLocked"): blocks.insert(.lock)
         case Notification.Name("com.apple.screenIsUnlocked"): blocks.remove(.lock)
         case NSWorkspace.didActivateApplicationNotification:
-            if isExcluded || (rest != nil && rest?.frontmostPID != workspace.frontmostApplication?.processIdentifier) {
+            let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let foreground = activated ?? workspace.frontmostApplication
+            foregroundProtection.invalidateFullScreen()
+            if rest != nil && rest?.frontmostPID != foreground?.processIdentifier {
                 cancelPresentation()
             }
+            tick(activatedApplication: foreground)
+            return
+        case NSWorkspace.activeSpaceDidChangeNotification, NSApplication.didChangeScreenParametersNotification:
+            foregroundProtection.invalidateFullScreen()
+            cancelPresentation()
             tick()
             return
         default:
@@ -550,6 +669,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     #if DEBUG
+    private func runMemoryProbe(_ output: URL, cycles: Int) {
+        guard let screen = NSScreen.main else { return }
+        Task { @MainActor in
+            var probe = MemoryProbe()
+            let pointer = CGPoint(x: screen.visibleFrame.minX + 16, y: screen.visibleFrame.minY + 16)
+            let edges = EntranceOrigin.allCases
+            reseed()
+            try? await Task.sleep(for: .seconds(2))
+            probe.sample("idle")
+
+            // Exercise every entrance once, then revisit all views to detect retained memory.
+            for cycle in 0..<cycles {
+                for kind in [Reminder.blink, .look, .water] {
+                    let label = "\(cycle)-\(kind.rawValue)"
+                    let shown = show(batch: ReminderBatch(main: kind), preview: true,
+                                     forcedEdge: edges[cycle % edges.count], preferredScreen: screen, samplePointer: pointer)
+                    guard shown else {
+                        probe.sample("failed-\(label)")
+                        continue
+                    }
+                    try? await Task.sleep(for: .milliseconds(350))
+                    probe.sample(label + "-moving")
+                    if cycle < edges.count && kind == .look {
+                        let remainder = max(0, (nudge?.entranceDuration ?? 0) - 0.10)
+                        try? await Task.sleep(for: .seconds(remainder))
+                        probe.sample(label + "-card")
+                    }
+                    dismissBlink()
+                    dismissNudge(animated: false)
+                }
+
+                openSettings()
+                try? await Task.sleep(for: .milliseconds(300))
+                probe.sample("\(cycle)-settings")
+                settings?.close()
+                beginRest(batch: ReminderBatch(main: .look), screen: screen, duration: 5, recordReminder: false)
+                try? await Task.sleep(for: .milliseconds(650))
+                probe.sample("\(cycle)-rest")
+                if rest?.hasKeyboard != true { probe.sample("failed-\(cycle)-rest") }
+                endRest(animated: true)
+                try? await Task.sleep(for: .milliseconds(600))
+                probe.sample("\(cycle)-closed")
+            }
+
+            try? await Task.sleep(for: .seconds(5))
+            probe.sample("settled")
+            probe.write(to: output, screen: screen)
+            NSApp.terminate(nil)
+        }
+    }
+
     private func verifyEdgePriority(screen: NSScreen, pointer: CGPoint) -> Bool {
         let original = schedule
         let originalEdge = previousEdge
@@ -578,6 +748,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             && schedule.timeLeft(for: .blink, now: now) == 60
     }
 
+    private func verifyNativeFullScreen(fixturePID: pid_t, output: URL) async -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: fixturePID),
+              pauseReason(for: app, refresh: true) == nil else { return false }
+        let command = output.appendingPathComponent("fullscreen-command.txt")
+        let state = output.appendingPathComponent("fullscreen-state.txt")
+        func wait(for expected: String) async -> Bool {
+            for _ in 0..<40 {
+                if (try? String(contentsOf: state, encoding: .utf8)) == expected { return true }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            return false
+        }
+
+        try? "enter".write(to: command, atomically: true, encoding: .utf8)
+        let didEnter = await wait(for: "fullscreen")
+        let detected = didEnter && pauseReason(for: app, refresh: true) == .fullScreen
+        let held = detected && !show(batch: ReminderBatch(main: .look))
+        preferences.pauseForFullScreen = false
+        let canDisable = pauseReason(for: app, refresh: true) == nil
+        preferences.pauseForFullScreen = true
+        try? "exit".write(to: command, atomically: true, encoding: .utf8)
+        let didExit = await wait(for: "windowed")
+        try? await Task.sleep(for: .milliseconds(150))
+        return held && canDisable && didExit && pauseReason(for: app, refresh: true) == nil
+    }
+
+    private func verifyMenuBarProgress() -> Bool {
+        guard !preferences.showMenuBarProgress, statusFillStep == nil, let button = item?.button else { return false }
+        let originalSchedule = schedule
+        defer {
+            schedule = originalSchedule
+            preferences.showMenuBarProgress = false
+        }
+
+        preferences.showMenuBarProgress = true
+        let time = now
+        schedule = ReminderSchedule(rules: [
+            .look: ReminderRule(minutes: 1),
+            .stand: ReminderRule(enabled: false, minutes: 60)
+        ])
+        schedule.advance(to: time - 30, idle: 0, excluded: false, resting: false)
+        schedule.advance(to: time, idle: 0, excluded: false, resting: false)
+        updateStatusIcon(at: time, suspended: false)
+        guard statusFillStep == StatusIcon.fillSteps / 2, button.image?.isTemplate == true else { return false }
+        let halfImage = button.image
+        updateStatusIcon(at: time, suspended: false)
+        guard halfImage === button.image else { return false }
+
+        schedule.advance(to: time + 30, idle: 0, excluded: false, resting: false)
+        updateStatusIcon(at: time + 30, suspended: true)
+        guard halfImage === button.image && statusFillStep == StatusIcon.fillSteps / 2 else { return false }
+        updateStatusIcon(at: time + 30, suspended: false)
+        guard statusFillStep == StatusIcon.fillSteps else { return false }
+
+        schedule.snooze(ReminderBatch(main: .look), now: time + 30)
+        updateStatusIcon(at: time + 30, suspended: false)
+        guard statusFillStep == 0 else { return false }
+        schedule.update(ReminderRule(enabled: false, minutes: 1), for: .look)
+        updateStatusIcon(at: time + 30, suspended: false)
+        return statusFillStep == nil && button.toolTip != Copy.name && button.image?.isTemplate == true
+    }
+
+    private func verifyStatusHover() -> Bool {
+        guard let button = item?.button, !preferences.showMenuBarProgress else { return false }
+        let originalSchedule = schedule
+        let originalLanguage = Copy.language
+        let time = now
+        defer {
+            schedule = originalSchedule
+            Copy.language = originalLanguage
+            tick()
+        }
+
+        Copy.language = .english
+        schedule = ReminderSchedule(rules: [.look: ReminderRule(minutes: 8)])
+        updateStatusHover(at: time, suspended: false)
+        guard button.toolTip == "Look away in 8 min" else { return false }
+        updateStatusHover(at: time, suspended: true)
+        guard button.toolTip == "Reminders paused" else { return false }
+
+        Copy.language = .chinese
+        schedule = ReminderSchedule(rules: [.stand: ReminderRule(minutes: 3)])
+        updateStatusHover(at: time, suspended: false)
+        guard button.toolTip == "3 分钟后站起来" else { return false }
+
+        var closedForMenu = false
+        let dismissMenu = Timer(timeInterval: 0.16, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.updateStatusHover(at: time, suspended: false)
+                closedForMenu = self.statusMenuIsOpen && button.toolTip == nil
+                self.menu.cancelTracking()
+            }
+        }
+        RunLoop.main.add(dismissMenu, forMode: .eventTracking)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: button)
+
+        updateStatusHover(at: time, suspended: false)
+        return closedForMenu && !statusMenuIsOpen && button.toolTip == "3 分钟后站起来"
+    }
+
     private func runProbe() {
         let arguments = ProcessInfo.processInfo.arguments
         guard let flag = arguments.firstIndex(of: "--ui-probe"), arguments.count > flag + 2,
@@ -591,16 +862,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let expectedName = Copy.chinese ? "歇哈嘛" : "Rest a Bit"
             let expectedQuit = Copy.chinese ? "退出歇哈嘛" : "Quit Rest a Bit"
             let menuBrandMatches = Bundle.main.bundleIdentifier == "local.restabit.app"
-                && item?.button?.toolTip == expectedName
+                && item?.button?.toolTip != Copy.name
                 && item?.button?.image?.accessibilityDescription == expectedName
                 && menu.items.last?.title == expectedQuit
             lines.append("Menu and application identity match: \(menuBrandMatches) [\(expectedName)]")
+            lines.append("Status icon hover does not show the app name: \(item?.button != nil && item?.button?.toolTip != Copy.name)")
+            lines.append("Optional menu-bar progress, pause, snooze and static fallback verified: \(verifyMenuBarProgress())")
             lines.append("Synthetic previous settings migrate and persist: \(Preferences.verifyMigration())")
             lines.append("Login item registration states verified without changing login items: \(LoginAtStartup.verifyTransitions())")
             lines.append("Forward direction sprite sets loaded: \(art?.hasDirectionalGaits == true)")
             reseed()
             let frontmost = { self.workspace.frontmostApplication?.processIdentifier == fixturePID }
             lines.append("Synthetic editor initially frontmost: \(frontmost())")
+            lines.append("Native status hover countdown, localization, pause and menu dismissal: \(verifyStatusHover())")
+            let fullScreenVerified = await verifyNativeFullScreen(fixturePID: fixturePID, output: output)
+            lines.append("Native full-screen pause, toggle, and exit verified: \(fullScreenVerified)")
+            let fixtureURL = output.appendingPathComponent("Fixture.app")
+            applyExcludedApp(fixtureURL)
+            let liveExclusion = frontmost() && pauseReason(refresh: true) == .excluded
+                && !show(batch: ReminderBatch(main: .look))
+            lines.append("Automatic reminder held for the excluded foreground app: \(liveExclusion)")
+            preferences.excluded = []
             let safe = screen.visibleFrame
             let pointer = CGPoint(x: safe.midX, y: safe.midY)
             let edgeStyles: [EntranceOrigin: EdgeMotion] = [
@@ -627,9 +909,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 let card = sample.captureCard(to: output.appendingPathComponent("card-\(edge.rawValue).png"))
                 lines.append("\(edge.rawValue): captured \(count) stage frames and card=\(card), kept editor frontmost=\(retainedFocus)")
-                lines.append("\(edge.rawValue): arrived at the center and kept animation click-through: \(sample.arrivesAtCenter && count == frameCount)")
+                lines.append("\(edge.rawValue): arrived at the center and kept animation click-through: \(sample.arrivesAtCenter && sample.usesCompactStage && count == frameCount)")
                 lines.append("\(edge.rawValue): slows down before stopping: \(sample.slowsBeforeArrival)")
                 lines.append("\(edge.rawValue): keeps forward heading: \(sample.keepsForwardHeading)")
+                lines.append("\(edge.rawValue): cue fits its own content: \(card && sample.cardFrame.width < 215 && sample.cardFitsLocalizedContent)")
                 if let stage = sample.stageFrame {
                     let frame = sample.cardFrame
                     let values: [CGFloat] = [
@@ -645,6 +928,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try? await Task.sleep(for: .milliseconds(120))
             }
             preferences.edgeMotion = .rotate
+            let originalLanguage = preferences.language
+            preferences.language = .english
+            let combined = ReminderBatch(main: .stand, included: [.stand, .look])
+            if show(batch: combined, forcedEdge: .right, demo: true, preferredScreen: screen, samplePointer: pointer),
+               let sample = nudge {
+                try? await Task.sleep(for: .seconds(sample.entranceDuration + 0.25))
+                let captured = sample.captureCard(to: output.appendingPathComponent("card-combined-english.png"))
+                lines.append("Combined English cue fits beside the fox: \(captured && sample.arrivesAtCenter && sample.cardFitsLocalizedContent)")
+                dismissNudge(animated: false)
+            }
+            preferences.language = originalLanguage
             lines.append("Scheduled edge reminder skips overlapping blink: \(verifyEdgePriority(screen: screen, pointer: pointer))")
             if show(batch: ReminderBatch(main: .water), preview: true, preferredScreen: screen, samplePointer: pointer),
                let scene = nudge {
@@ -663,6 +957,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let verified = art?.hasWaterPoses == true && scene.waterSceneIsCentered
                     && retainedFocus && captured == frames && card
                 lines.append("Water scene is centered and leaves focus on the editor: \(verified)")
+                lines.append("Water cue fits its complete localized text: \(card && scene.cardFitsLocalizedContent)")
                 if let stage = scene.stageFrame {
                     let frame = scene.cardFrame
                     let values: [CGFloat] = [
@@ -761,6 +1056,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try? await Task.sleep(for: .milliseconds(120))
             }
             lines.append("Rest illustration hills loaded: \(RestScene.hills.illustration != nil)")
+            preferences.language = .english
+            beginRest(batch: combined, screen: screen, recordReminder: false)
+            try? await Task.sleep(for: .milliseconds(350))
+            let standCaptured = rest?.capture(to: output.appendingPathComponent("rest-stand-english.png")) == true
+            lines.append("English standing break rendered: \(standCaptured)")
+            endRest(animated: false, countBreak: false)
+            preferences.language = originalLanguage
             let systemAppearance = NSApp.appearance
             NSApp.appearance = NSAppearance(named: .darkAqua)
             beginRest(batch: ReminderBatch(main: .look), screen: screen, recordReminder: false)
@@ -799,21 +1101,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     preferences.excluded.first?.id == expectedID && window.attachedSheet == nil
                 let captured = ProbeCapture.view(host, to: output.appendingPathComponent("settings-excluded.png"))
                 lines.append("Excluded app appears after sheet closes without reopening settings: \(updated && captured)")
+                let syntheticHelper = fixtureURL.appendingPathComponent("Contents/Frameworks/Fixture Helper.app", isDirectory: true)
+                let identity = ForegroundIdentity(bundleIdentifier: "example.invalid.helper", locations: [syntheticHelper])
+                let unrelated = ForegroundIdentity(bundleIdentifier: "example.invalid.helper", locations: [])
+                let iconAndMatching = preferences.excluded.first.map { exclusion in
+                    let olderExclusion = ExcludedApp(id: exclusion.id, name: exclusion.name)
+                    return exclusion.applicationIcon != nil && identity.matches(exclusion)
+                        && identity.matches(olderExclusion) && !unrelated.matches(exclusion)
+                } ?? false
+                lines.append("Excluded icon and nested helper matching verified: \(iconAndMatching)")
             }
+            settings?.setContentSize(NSSize(width: 480, height: settings?.contentView?.frame.height ?? 660))
+            preferences.excluded.append(ExcludedApp(
+                id: "local.restabit.demo-long-name",
+                name: "Sample Application with an Unusually Long Name for Checking English Settings Layout at the Minimum Window Width"
+            ))
             for language in [AppLanguage.english, .chinese] {
                 preferences.language = language
                 try? await Task.sleep(for: .milliseconds(150))
                 let title = language == .chinese ? "歇哈嘛设置" : "Rest a Bit Settings"
                 let quit = language == .chinese ? "退出歇哈嘛" : "Quit Rest a Bit"
                 let logo = language == .chinese ? "歇哈嘛" : "Rest a Bit"
-                let verified = settings?.title == title && menu.items.last?.title == quit && item?.button?.toolTip == logo
+                let verified = settings?.title == title && menu.items.last?.title == quit
+                    && item?.button?.image?.accessibilityDescription == logo && item?.button?.toolTip != Copy.name
                 let captured = settings?.contentView.map {
                     ProbeCapture.view($0, to: output.appendingPathComponent("settings-\(language.rawValue).png"))
                 } ?? false
                 lines.append("Live language \(language.rawValue) updated: \(verified && captured)")
             }
             preferences.language = .system
-            settings?.orderOut(nil)
+            let originalAppearance = NSApp.appearance
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+            preferences.showMenuBarProgress = true
+            try? await Task.sleep(for: .milliseconds(150))
+            let darkProgressSettings = settings?.contentView.map {
+                ProbeCapture.view($0, to: output.appendingPathComponent("settings-progress-dark.png"))
+            } ?? false
+            lines.append("Enabled menu-bar progress settings rendered in dark mode: \(darkProgressSettings)")
+            preferences.showMenuBarProgress = false
+            NSApp.appearance = originalAppearance
+            let settingsFrame = settings?.frame
+            settings?.close()
+            let released = settings == nil
+            openSettings()
+            lines.append("Closed settings rebuilds at the same position: \(released && settings?.frame == settingsFrame)")
+            settings?.close()
             let report = lines.joined(separator: "\n") + "\n"
             try? report.write(to: output.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
             NSApp.terminate(nil)

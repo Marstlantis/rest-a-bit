@@ -76,6 +76,19 @@ final class LandingTests: XCTestCase {
         XCTAssertTrue(leftDisplay.contains(card.frame))
     }
 
+    func testFittedBodyHasOnlyTheRequestedArrowSpace() throws {
+        let center = CGPoint(x: leftDisplay.midX, y: leftDisplay.midY)
+        let size = CGSize(width: 152, height: 63)
+        let side = try XCTUnwrap(Landing.callout(near: center, in: leftDisplay, pointer: center,
+                                                 preferred: .left, fittedBody: size))
+        let below = try XCTUnwrap(Landing.callout(near: center, in: leftDisplay, pointer: center,
+                                                  preferred: .top, fittedBody: size))
+        XCTAssertEqual(side.frame.size, CGSize(width: 159, height: 63))
+        XCTAssertEqual(below.frame.size, CGSize(width: 152, height: 70))
+        XCTAssertEqual(side.frame.midY, center.y)
+        XCTAssertEqual(below.frame.midX, center.x)
+    }
+
     func testUnsafeSmallAreaOffersOnlyAContainedCard() throws {
         let small = CGRect(x: 0, y: 0, width: 302, height: 180)
         XCTAssertTrue(Landing.candidates(in: small, pointer: .zero).isEmpty)

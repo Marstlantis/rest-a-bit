@@ -1,12 +1,11 @@
-import ImageIO
 import SwiftUI
 
 extension RestScene {
     var illustration: CGImage? {
         guard Self.variants.contains(self),
-              let url = Bundle.module.url(forResource: rawValue, withExtension: "jpg", subdirectory: "Assets/Scenes"),
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+              let url = Bundle.module.url(forResource: rawValue, withExtension: "jpg", subdirectory: "Assets/Scenes")
+        else { return nil }
+        return ArtworkBitmap.load(url)
     }
 }
 

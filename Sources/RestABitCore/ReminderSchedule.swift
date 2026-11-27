@@ -50,6 +50,7 @@ public struct ReminderBatch: Equatable {
 
 public struct ReminderSchedule {
     private static let breakMergeWindow: TimeInterval = 30
+    private static let snoozeDuration: TimeInterval = 5 * 60
     private static let blinkBreakWindow: TimeInterval = 120
     private static let waterConflictWindow: TimeInterval = 30
     private static let waterGapAfterHeadsUp: TimeInterval = 40
@@ -130,7 +131,7 @@ public struct ReminderSchedule {
 
     public mutating func snooze(_ batch: ReminderBatch, now: TimeInterval) {
         for reminder in batch.included {
-            snoozedUntil[reminder] = now + 300
+            snoozedUntil[reminder] = now + Self.snoozeDuration
         }
     }
 
@@ -144,6 +145,12 @@ public struct ReminderSchedule {
         [.stand, .look].compactMap { reminder in
             readyTime(for: reminder, now: now).map { (reminder, $0) }
         }.min { $0.1 < $1.1 }
+    }
+
+    public func nextScreenBreakProgress(now: TimeInterval) -> Double? {
+        guard let (reminder, remaining) = nextScreenBreak(now: now), let rule = rules[reminder] else { return nil }
+        let duration = snoozedUntil[reminder] == nil ? rule.seconds : Self.snoozeDuration
+        return min(1, max(0, 1 - remaining / duration))
     }
 
     public func next(now: TimeInterval) -> (Reminder, TimeInterval)? {
