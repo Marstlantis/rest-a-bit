@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Reminder: String, CaseIterable, Codable, Hashable {
-    case look, water, stand, blink
+    case look, water, stand, blink, pelvicFloor
 
     public var defaultMinutes: Int {
         switch self {
@@ -9,6 +9,7 @@ public enum Reminder: String, CaseIterable, Codable, Hashable {
         case .water: 40
         case .stand: 60
         case .blink: 10
+        case .pelvicFloor: 120
         }
     }
 
@@ -18,12 +19,17 @@ public enum Reminder: String, CaseIterable, Codable, Hashable {
         case .water: 12
         case .stand: 45
         case .blink: 3.4
+        case .pelvicFloor: 12
         }
+    }
+
+    public var defaultRule: ReminderRule {
+        ReminderRule(enabled: self != .pelvicFloor, minutes: defaultMinutes)
     }
 
     public var usesEdgeEntrance: Bool { self == .look || self == .stand }
 
-    static let priority: [Reminder] = [.stand, .look, .water, .blink]
+    static let priority: [Reminder] = [.stand, .look, .water, .pelvicFloor, .blink]
 }
 
 public struct ReminderRule: Codable, Equatable {
@@ -55,6 +61,7 @@ public struct ReminderSchedule {
     private static let waterConflictWindow: TimeInterval = 30
     private static let waterGapAfterHeadsUp: TimeInterval = 40
     private static let waterGapAfterRest: TimeInterval = 25
+    private static let roomBetweenShortBreaks: TimeInterval = 30
     public static let idlePauseAfter: TimeInterval = 120
     private static let idleResetAfter: TimeInterval = 600
     public private(set) var rules: [Reminder: ReminderRule]
@@ -69,7 +76,7 @@ public struct ReminderSchedule {
 
     public init(rules: [Reminder: ReminderRule] = [:]) {
         self.rules = Dictionary(uniqueKeysWithValues: Reminder.allCases.map {
-            ($0, rules[$0] ?? ReminderRule(minutes: $0.defaultMinutes))
+            ($0, rules[$0] ?? $0.defaultRule)
         })
     }
 
@@ -163,7 +170,11 @@ public struct ReminderSchedule {
         if reminder.usesEdgeEntrance {
             deferNearbyWater(now: now, gap: Self.waterGapAfterHeadsUp)
         }
-        let blinkWindow = reminder.usesEdgeEntrance ? Self.blinkBreakWindow : Self.waterConflictWindow
+        let blinkWindow: TimeInterval = switch reminder {
+        case .look, .stand: screenBreakWindow(Self.blinkBreakWindow, for: reminder)
+        case .pelvicFloor: Reminder.pelvicFloor.presentationSeconds
+        default: Self.waterConflictWindow
+        }
         if reminder != .blink, let blink = timeLeft(for: .blink, now: now), blink <= blinkWindow {
             finish(ReminderBatch(main: .blink))
         }
@@ -176,6 +187,12 @@ public struct ReminderSchedule {
     private mutating func deferNearbyWater(now: TimeInterval, gap: TimeInterval) {
         guard let water = timeLeft(for: .water, now: now), water <= Self.waterConflictWindow else { return }
         waterDeferredUntil = max(waterDeferredUntil, now + gap)
+    }
+
+    private func screenBreakWindow(_ length: TimeInterval, for reminder: Reminder) -> TimeInterval {
+        // A short interval still leaves room for another reminder between screen breaks.
+        guard let period = rules[reminder]?.seconds else { return length }
+        return min(length, period - Self.roomBetweenShortBreaks)
     }
 
     private func readyTime(for reminder: Reminder, now: TimeInterval) -> TimeInterval? {
@@ -196,8 +213,17 @@ public struct ReminderSchedule {
             }
             return time
         case .blink:
-            if let edge = nextScreenBreak(now: now)?.1, edge <= time + Self.blinkBreakWindow { return nil }
+            if let (edge, remaining) = nextScreenBreak(now: now),
+               remaining <= time + screenBreakWindow(Self.blinkBreakWindow, for: edge) { return nil }
             if let water = readyTime(for: .water, now: now), water <= time + Self.waterConflictWindow { return nil }
+            if let practice = readyTime(for: .pelvicFloor, now: now),
+               practice <= time + Reminder.pelvicFloor.presentationSeconds { return nil }
+            return time
+        case .pelvicFloor:
+            if let (edge, remaining) = nextScreenBreak(now: now),
+               remaining <= time + screenBreakWindow(PelvicPracticeTiming.duration, for: edge) { return nil }
+            if let water = readyTime(for: .water, now: now),
+               water <= time + Reminder.pelvicFloor.presentationSeconds { return nil }
             return time
         }
     }

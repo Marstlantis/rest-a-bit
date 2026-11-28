@@ -34,6 +34,9 @@ trap 'rmdir "$STAGING" 2>/dev/null || true' EXIT
 NEW_BUNDLE="$STAGING/$APP_NAME.app"
 mkdir -p "$NEW_BUNDLE/Contents/MacOS" "$NEW_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$EXECUTABLE" "$NEW_BUNDLE/Contents/MacOS/$EXECUTABLE"
+if [[ "$CONFIGURATION" == release ]]; then
+    xcrun strip -S -x "$NEW_BUNDLE/Contents/MacOS/$EXECUTABLE"
+fi
 cp "$PLIST" "$NEW_BUNDLE/Contents/Info.plist"
 cp -R Support/zh-Hans.lproj Support/zh-Hant.lproj "$NEW_BUNDLE/Contents/Resources/"
 cp -R "$BUILD_DIR/${EXECUTABLE}_${EXECUTABLE}.bundle" "$NEW_BUNDLE/Contents/Resources/"

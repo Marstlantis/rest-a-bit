@@ -38,10 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var previousEdge: EntranceOrigin?
     private var previousEdgeMotion: EdgeMotion?
     private var previousBlinkMotion: BlinkMotion?
+    private var previousPelvicMotion: PelvicPracticeMotion?
     private var previousRestScene: RestScene?
     private var random = SeededRandom(seed: UInt64.random(in: .min ... .max))
     private var nudge: NudgePresentation?
     private var blink: BlinkPresentation?
+    private var pelvicPractice: PelvicPracticePresentation?
     private var retreat: NudgePresentation?
     private var rest: RestPresentation?
     private var fadingRest: RestPresentation?
@@ -63,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var workspace: NSWorkspace { .shared }
     private var reducedMotion: Bool { workspace.accessibilityDisplayShouldReduceMotion }
     private var presentationAvailable: Bool {
-        nudge == nil && blink == nil && rest == nil && retreat == nil && fadingRest == nil && blocks.isEmpty
+        nudge == nil && blink == nil && pelvicPractice == nil && rest == nil && retreat == nil && fadingRest == nil && blocks.isEmpty
     }
     private var isExcluded: Bool {
         foregroundProtection.isExcluded(workspace.frontmostApplication, exclusions: preferences.excluded)
@@ -112,14 +114,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                                                           eventType: CGEventType(rawValue: UInt32.max)!)
         let time = now
         let reason = pauseReason(for: activatedApplication)
-        schedule.advance(to: time, idle: idle, excluded: reason != nil, resting: rest != nil)
+        let practicing = pelvicPractice?.isRunning == true
+        schedule.advance(to: time, idle: idle, excluded: reason != nil, resting: rest != nil || practicing)
         let scheduledNudge = nudge.map { !$0.preview && !$0.demo } ?? false
         if (reason != nil || idle >= ReminderSchedule.idlePauseAfter),
-           scheduledNudge || blink?.preview == false {
+           scheduledNudge || blink?.preview == false || pelvicPractice?.preview == false {
             cancelPresentation(cooldown: 0)
         }
         let clockSuspended = reason != nil || schedule.pausedUntil != nil ||
-            idle >= ReminderSchedule.idlePauseAfter || (rest != nil && pendingCommit == nil)
+            idle >= ReminderSchedule.idlePauseAfter || (rest != nil && pendingCommit == nil) || practicing
         updateStatusIcon(at: time, suspended: clockSuspended)
         updateStatusHover(at: time, suspended: clockSuspended)
         guard reason == nil, presentationAvailable,
@@ -141,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func statusHoverTitle(at time: TimeInterval, suspended: Bool) -> String {
-        if rest != nil { return Copy.text("休息中", "On a break") }
+        if rest != nil || pelvicPractice?.isRunning == true { return Copy.text("休息中", "On a break") }
         if suspended {
             return Copy.text("提醒已暂停", "Reminders paused")
         }
@@ -181,14 +184,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             settings?.title = Copy.settingsTitle
             nudge?.refreshCopy()
             blink?.refreshCopy()
+            pelvicPractice?.refreshCopy()
             menuNeedsUpdate(menu)
         }
         let affectedNudge = nudge.flatMap { presentation in
             presentation.preview || presentation.demo ? nil : presentation.batch.included
         }?.contains { schedule.rules[$0] != preferences.rules[$0] } ?? false
         let affectedBlink = blink?.preview == false && schedule.rules[.blink] != preferences.rules[.blink]
+        let affectedPractice = pelvicPractice?.preview == false &&
+            schedule.rules[.pelvicFloor] != preferences.rules[.pelvicFloor]
         for (kind, rule) in preferences.rules { schedule.update(rule, for: kind) }
-        if affectedNudge || affectedBlink {
+        if affectedNudge || affectedBlink || affectedPractice {
             cancelPresentation()
         }
         tick()
@@ -201,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard presentationAvailable, preview || demo || pauseReason(refresh: true) == nil else { return false }
         let pointer = samplePointer ?? NSEvent.mouseLocation
         guard let screen = preferredScreen ?? NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? NSScreen.main else { return false }
+        if batch.main == .pelvicFloor { return showPelvicPractice(on: screen, preview: preview || demo) }
         if batch.main == .blink {
             let style = nextVariant(preference: preferences.blinkMotion, rotating: .rotate,
                                     choices: BlinkMotion.variants, previous: previousBlinkMotion)
@@ -317,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         deadline = nil
         guard let presented = nudge else { return }
         nudge = nil
+        if !presented.preview && !presented.demo { leaveReminderGap(after: now) }
         if animated && !reducedMotion {
             retreat = presented
             presented.retreat { [weak self, weak presented] in
@@ -334,6 +342,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         deadline?.cancel()
         deadline = nil
         blink.close()
+        if !blink.preview { leaveReminderGap(after: now) }
+    }
+
+    private func showPelvicPractice(on screen: NSScreen, preview: Bool) -> Bool {
+        let styles = PelvicPracticeMotion.allCases.filter { $0 != previousPelvicMotion }
+        let style = styles.randomElement(using: &random) ?? .curl
+        guard let practice = PelvicPracticePresentation(screen: screen, art: art, style: style, motion: !reducedMotion,
+                                                        preview: preview, start: { [weak self] in self?.startPelvicPractice() },
+                                                        dismiss: { [weak self] in self?.dismissPelvicPractice() })
+        else { return false }
+        previousPelvicMotion = style
+        pelvicPractice = practice
+        practice.show()
+        if !preview {
+            schedule.notePresentation(.pelvicFloor, now: now)
+            schedule.finish(ReminderBatch(main: .pelvicFloor))
+            after(Reminder.pelvicFloor.presentationSeconds) { [weak self] in self?.dismissPelvicPractice() }
+        }
+        return true
+    }
+
+    private func startPelvicPractice() {
+        guard let practice = pelvicPractice, !practice.isRunning else { return }
+        guard practice.preview || pauseReason(refresh: true) == nil else {
+            dismissPelvicPractice()
+            return
+        }
+        let time = now
+        schedule.advance(to: time, idle: 0, excluded: false, resting: true)
+        practice.start(at: time)
+        after(PelvicPracticeTiming.duration + 2.5) { [weak self] in self?.dismissPelvicPractice() }
+    }
+
+    private func dismissPelvicPractice() {
+        guard let practice = pelvicPractice else { return }
+        pelvicPractice = nil
+        deadline?.cancel()
+        deadline = nil
+        let time = now
+        if practice.isRunning { schedule.advance(to: time, idle: 0, excluded: pauseReason() != nil, resting: true) }
+        if !practice.preview || practice.isRunning { leaveReminderGap(after: time) }
+        practice.close()
     }
 
     @objc private func takeBreak() {
@@ -342,6 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return
         }
         if let nudge, !nudge.preview && !nudge.demo { schedule.finish(nudge.batch) }
+        dismissPelvicPractice()
         dismissBlink()
         dismissNudge(animated: false)
         retreat?.close()
@@ -388,6 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if countBreak, let pendingCommit {
             schedule.finish(pendingCommit)
             schedule.noteRestEnded(now: now)
+            leaveReminderGap(after: now)
         }
         pendingCommit = nil
         updateStatusIcon(at: now, suspended: !countBreak || schedule.pausedUntil != nil)
@@ -411,9 +463,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
+    private func leaveReminderGap(after time: TimeInterval) {
+        nextPresentation = max(nextPresentation, time + 6)
+    }
+
     private func cancelPresentation(cooldown: Double = 30) {
         if nudge != nil { dismissNudge(animated: false) }
         dismissBlink()
+        dismissPelvicPractice()
         retreat?.close()
         retreat = nil
         endRest(animated: false, countBreak: false)
@@ -438,6 +495,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func previewBlink() { show(batch: ReminderBatch(main: .blink), preview: true) }
 
     @objc private func previewWater() { show(batch: ReminderBatch(main: .water), preview: true) }
+
+    @objc private func previewPelvicPractice() {
+        show(batch: ReminderBatch(main: .pelvicFloor), preview: true)
+    }
 
     @objc private func previewRest() {
         guard presentationAvailable,
@@ -523,7 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             let minutes = max(1, Int(ceil((paused - now) / 60)))
             status = Copy.text("已暂停 · \(minutes) 分钟", "Paused · \(minutes) min")
         } else if protection == .excluded {
-            status = Copy.text("已为当前应用暂停", "Paused for current app")
+            status = Copy.text("已为当前应用暂停", "Paused in this app")
         } else if protection == .fullScreen {
             status = Copy.text("全屏中，提醒已暂停", "Paused in full screen")
         } else if let (reminder, time) = schedule.next(now: now) {
@@ -533,7 +594,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             status = Copy.text("提醒已关闭", "Reminders off")
         }
         menu.addItem(withTitle: status, action: nil, keyEquivalent: "")
-        if schedule.pausedUntil == nil, protection == nil, let next = schedule.next(now: now), !next.0.usesEdgeEntrance,
+        if schedule.pausedUntil == nil, protection == nil,
+           let next = schedule.next(now: now), !next.0.usesEdgeEntrance,
            let (reminder, time) = schedule.nextScreenBreak(now: now) {
             let minutes = max(0, Int(ceil(time / 60)))
             menu.addItem(withTitle: Copy.text("下次休息 · \(reminder.name) · \(minutes) 分钟",
@@ -544,15 +606,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if rest != nil {
             add(Copy.text("结束休息", "End Break"), #selector(closeRest))
         } else {
-            add(Copy.text("现在休息", "Take a Break Now"), #selector(takeBreak))
+            add(Copy.text("现在休息", "Take a Break"), #selector(takeBreak))
             if let nudge, !nudge.preview, !nudge.dismissOnly, nudge.batch.main != .water {
-                add(Copy.text("稍后 5 分钟", "Remind in 5 Min"), #selector(snoozeNudge))
+                add(Copy.text("稍后 5 分钟", "Snooze for 5 Min"), #selector(snoozeNudge))
             }
         }
         add(Copy.text("预览狐狸", "Preview Fox"), #selector(preview))
-        add(Copy.text("预览眨眼提醒", "Preview Blink Reminder"), #selector(previewBlink))
-        add(Copy.text("预览喝水提醒", "Preview Water Reminder"), #selector(previewWater))
-        add(Copy.text("预览休息插画", "Preview Break Illustration"), #selector(previewRest))
+        add(Copy.text("预览眨眼提醒", "Preview Blink"), #selector(previewBlink))
+        add(Copy.text("预览喝水提醒", "Preview Water"), #selector(previewWater))
+        add(Copy.text("预览休息插画", "Preview Break"), #selector(previewRest))
+        add(Copy.text("提肛练习…", "Kegel Exercises…"), #selector(previewPelvicPractice))
         if schedule.pausedUntil != nil {
             add(Copy.text("继续提醒", "Resume Reminders"), #selector(resume))
         } else {
@@ -560,6 +623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         menu.addItem(.separator())
         add(Copy.text("设置…", "Settings…"), #selector(openSettings), key: ",")
+        #if DEBUG
         let debugItem = NSMenuItem(title: Copy.text("开发预览", "Developer Preview"), action: nil, keyEquivalent: "")
         let debug = NSMenu()
         for edge in EntranceOrigin.allCases {
@@ -578,6 +642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         debug.addItem(quick)
         debugItem.submenu = debug
         menu.addItem(debugItem)
+        #endif
         add(Copy.quitTitle, #selector(quit), key: "q")
     }
 
@@ -595,11 +660,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = self
     }
 
+    #if DEBUG
     @objc private func reseed() {
         random = SeededRandom(seed: 42)
         previousEdge = nil
         previousEdgeMotion = nil
         previousBlinkMotion = nil
+        previousPelvicMotion = nil
         previousRestScene = nil
     }
 
@@ -615,6 +682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             show(batch: ReminderBatch(main: .look), demo: true)
         }
     }
+    #endif
 
     private func registerSystemEvents() {
         let events: [Notification.Name] = [
@@ -849,6 +917,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return closedForMenu && !statusMenuIsOpen && button.toolTip == "3 分钟后站起来"
     }
 
+    private func verifyPelvicPractice(on screen: NSScreen, output: URL) async -> Bool {
+        let originalLanguage = Copy.language
+        defer {
+            dismissPelvicPractice()
+            Copy.language = originalLanguage
+            menuNeedsUpdate(menu)
+        }
+        Copy.language = .english
+        menuNeedsUpdate(menu)
+        let englishMenu = menu.items.contains { $0.title == "Kegel Exercises…" && $0.action == #selector(previewPelvicPractice) }
+        guard PelvicPracticeMotion.allCases.allSatisfy({
+            $0.frames().count == 25 && $0.frames(motion: false).count == 1
+        }),
+              show(batch: ReminderBatch(main: .pelvicFloor), preview: true, preferredScreen: screen),
+              let practice = pelvicPractice else { return false }
+        try? await Task.sleep(for: .milliseconds(660))
+        let englishInvitation = practice.capture(in: output, label: "ready-english")
+        Copy.language = .chinese
+        practice.refreshCopy()
+        menuNeedsUpdate(menu)
+        let chineseNames = Reminder.pelvicFloor.name == "提肛" &&
+            menu.items.contains { $0.title == "提肛练习…" && $0.action == #selector(previewPelvicPractice) }
+        try? await Task.sleep(for: .milliseconds(150))
+        let invitation = !practice.isRunning && practice.isCompactAndClickThrough &&
+            practice.capture(in: output, label: "ready")
+        startPelvicPractice()
+        try? await Task.sleep(for: .milliseconds(3_320))
+        let transition = practice.capture(in: output, label: "transition")
+        try? await Task.sleep(for: .milliseconds(910))
+        let contraction = practice.isRunning && practice.capture(in: output, label: "squeeze")
+        Copy.language = .english
+        practice.refreshCopy()
+        try? await Task.sleep(for: .milliseconds(150))
+        let englishContraction = practice.capture(in: output, label: "squeeze-english")
+        try? await Task.sleep(for: .milliseconds(3_030))
+        let release = practice.capture(in: output, label: "release")
+        dismissPelvicPractice()
+        return englishMenu && chineseNames && englishInvitation && englishContraction &&
+            invitation && transition && contraction && release && practice.isClosed
+    }
+
     private func runProbe() {
         let arguments = ProcessInfo.processInfo.arguments
         guard let flag = arguments.firstIndex(of: "--ui-probe"), arguments.count > flag + 2,
@@ -877,6 +986,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             lines.append("Native status hover countdown, localization, pause and menu dismissal: \(verifyStatusHover())")
             let fullScreenVerified = await verifyNativeFullScreen(fixturePID: fixturePID, output: output)
             lines.append("Native full-screen pause, toggle, and exit verified: \(fullScreenVerified)")
+            let practice = await verifyPelvicPractice(on: screen, output: output)
+            lines.append("Centered pelvic practice waits for consent, renders both phases, and closes: \(practice)")
             let fixtureURL = output.appendingPathComponent("Fixture.app")
             applyExcludedApp(fixtureURL)
             let liveExclusion = frontmost() && pauseReason(refresh: true) == .excluded
@@ -940,6 +1051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
             preferences.language = originalLanguage
             lines.append("Scheduled edge reminder skips overlapping blink: \(verifyEdgePriority(screen: screen, pointer: pointer))")
+            preferences.language = .english
             if show(batch: ReminderBatch(main: .water), preview: true, preferredScreen: screen, samplePointer: pointer),
                let scene = nudge {
                 var retainedFocus = frontmost()
@@ -957,7 +1069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 let verified = art?.hasWaterPoses == true && scene.waterSceneIsCentered
                     && retainedFocus && captured == frames && card
                 lines.append("Water scene is centered and leaves focus on the editor: \(verified)")
-                lines.append("Water cue fits its complete localized text: \(card && scene.cardFitsLocalizedContent)")
+                lines.append("Water cue fits its complete English text: \(card && scene.cardFitsLocalizedContent)")
                 if let stage = scene.stageFrame {
                     let frame = scene.cardFrame
                     let values: [CGFloat] = [
@@ -972,6 +1084,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             } else {
                 lines.append("Water scene did not open")
             }
+            preferences.language = originalLanguage
             preferences.blinkMotion = .hop
             if show(batch: ReminderBatch(main: .blink), preview: true, preferredScreen: screen), let sample = blink {
                 let centered = abs(sample.windowFrame.midX - safe.midX) <= 1 &&
@@ -1099,7 +1212,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 let expectedID = Bundle(url: fixtureURL)?.bundleIdentifier
                 let updated = expectedID != nil && preferences.excluded.count == 1 &&
                     preferences.excluded.first?.id == expectedID && window.attachedSheet == nil
-                let captured = ProbeCapture.view(host, to: output.appendingPathComponent("settings-excluded.png"))
+                var captured = false
+                if let scroll = ProbeCapture.scrollView(in: host), let document = scroll.documentView {
+                    let origin = scroll.contentView.bounds.origin
+                    let bottom = document.isFlipped ? max(0, document.frame.height - scroll.contentView.bounds.height) : 0
+                    scroll.contentView.scroll(to: CGPoint(x: origin.x, y: bottom))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    try? await Task.sleep(for: .milliseconds(150))
+                    captured = ProbeCapture.view(host, to: output.appendingPathComponent("settings-excluded.png"))
+                    scroll.contentView.scroll(to: origin)
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
                 lines.append("Excluded app appears after sheet closes without reopening settings: \(updated && captured)")
                 let syntheticHelper = fixtureURL.appendingPathComponent("Contents/Frameworks/Fixture Helper.app", isDirectory: true)
                 let identity = ForegroundIdentity(bundleIdentifier: "example.invalid.helper", locations: [syntheticHelper])

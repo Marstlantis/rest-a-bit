@@ -41,7 +41,7 @@ final class LoginAtStartup: ObservableObject {
         do {
             if value { try register() } else { try unregister() }
         } catch {
-            message = Copy.text("无法更改登录时启动。", "Couldn’t change launch at login.")
+            message = Copy.text("无法更改登录时启动。", "Couldn’t update the login item.")
                 + " " + error.localizedDescription
         }
         refresh()

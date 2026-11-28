@@ -40,6 +40,7 @@ extension Reminder {
         case .water: Copy.text("喝水", "Water")
         case .stand: Copy.text("站立", "Stand up")
         case .blink: Copy.text("眨眼", "Blink")
+        case .pelvicFloor: Copy.text("提肛", "Kegel exercises")
         }
     }
 
@@ -49,15 +50,17 @@ extension Reminder {
         case .water: "drop"
         case .stand: "figure.stand"
         case .blink: "eye.circle"
+        case .pelvicFloor: "waveform.path"
         }
     }
 
     var nudge: String {
         switch self {
         case .look: Copy.text("看哈远处嘛", "Look into the distance")
-        case .water: Copy.text("该喝水啦～", "Have a sip")
+        case .water: Copy.text("该喝水啦～", "Sip some water")
         case .stand: Copy.text("站起来休息哈嘛", "Stand up for a bit")
         case .blink: Copy.text("眨两哈嘛", "Blink twice")
+        case .pelvicFloor: Copy.text("跟狐狸练哈嘛", "Kegels with the fox")
         }
     }
 
@@ -65,16 +68,17 @@ extension Reminder {
         switch self {
         case .look: Copy.text("看哈屏幕外的远处嘛", "Look into the distance")
         case .stand: Copy.text("站起来休息哈嘛", "Stand up for a bit")
-        case .water, .blink: nudge
+        case .water, .blink, .pelvicFloor: nudge
         }
     }
 
     var aside: String {
         switch self {
         case .look: Copy.text("也看哈远处嘛", "Look into the distance")
-        case .water: Copy.text("也可以喝几口水", "Have a sip of water")
-        case .stand: Copy.text("也可以起来走几步", "Stand up and stretch")
+        case .water: Copy.text("也可以喝几口水", "Sip some water")
+        case .stand: Copy.text("也可以起来走几步", "Walk a few steps")
         case .blink: Copy.text("眨两哈嘛", "Blink twice")
+        case .pelvicFloor: nudge
         }
     }
 }

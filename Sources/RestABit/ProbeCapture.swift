@@ -5,7 +5,11 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum ProbeCapture {
-    static func stage(_ view: NSView, in canvas: CGRect? = nil, to file: URL) -> Bool {
+    static func scrollView(in root: NSView) -> NSScrollView? {
+        (root as? NSScrollView) ?? root.subviews.lazy.compactMap { scrollView(in: $0) }.first
+    }
+
+    static func stage(_ view: NSView, in canvas: CGRect? = nil, flipped: Bool = false, to file: URL) -> Bool {
         guard let model = view.layer else { return false }
         let canvas = canvas ?? view.bounds
         let size = canvas.size
@@ -13,6 +17,10 @@ enum ProbeCapture {
                                       bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
         context.scaleBy(x: 2, y: 2)
+        if flipped {
+            context.translateBy(x: 0, y: size.height)
+            context.scaleBy(x: 1, y: -1)
+        }
         context.translateBy(x: -canvas.minX, y: -canvas.minY)
         (model.presentation() ?? model).render(in: context)
         guard let image = context.makeImage(),

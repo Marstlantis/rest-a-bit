@@ -3,8 +3,8 @@ import QuartzCore
 import RestABitCore
 
 enum FoxPose: String, CaseIterable {
-    case peek, run, gather, brake, look, rest
-    case stand, lookBack, settle, step, stretch, land
+    case peek, run, gather, brake, look
+    case stand, lookBack, step, stretch, land
     case blinkOpen, blinkHalf, blinkClosed, blinkCrouch, blinkAir, blinkLand
     case frontLeft, frontGather, frontRight, frontStand
     case rearLeft, rearGather, rearRight, rearStand, rearTurnStart, rearTurnMiddle, rearLook
@@ -13,7 +13,6 @@ enum FoxPose: String, CaseIterable {
     var substitute: FoxPose? {
         switch self {
         case .stand, .lookBack: .look
-        case .settle: .peek
         case .step: .gather
         case .stretch, .land: .brake
         case .blinkOpen, .blinkHalf, .blinkClosed, .blinkCrouch, .blinkAir, .blinkLand: .look

@@ -2,6 +2,7 @@
 """Slice the original PNG drawings into registration-aligned sprite frames."""
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +29,8 @@ def slice_sheet(path, poses, ground=GROUND, columns=3, rows=2, lift=None, scale=
          *filters, "-pix_fmt", "rgba", "-f", "rawvideo", "-"]
     )
     for index, (name, body_x) in enumerate(poses):
+        if name is None:
+            continue
         col, row = index % columns, index // columns
         left, right = col * width // columns, (col + 1) * width // columns
         top, bottom = row * height // rows, (row + 1) * height // rows
@@ -60,12 +63,12 @@ def slice_sheet(path, poses, ground=GROUND, columns=3, rows=2, lift=None, scale=
 
 slice_sheet(ROOT / "Support" / "Art" / "primary.png", [
     ("peek", 0.162), ("run", 0.500), ("gather", 0.818),
-    ("brake", 0.139), ("look", 0.493), ("rest", 0.824),
+    ("brake", 0.139), ("look", 0.493), (None, 0.824),
 ])
 extra = ROOT / "Support" / "Art" / "gestures.png"
 if extra.is_file():
     slice_sheet(extra, [
-        ("stand", 0.155), ("lookBack", 0.495), ("settle", 0.822),
+        ("stand", 0.155), ("lookBack", 0.495), (None, 0.822),
         ("step", 0.161), ("stretch", 0.494), ("land", 0.820),
     ])
 
@@ -91,3 +94,23 @@ subprocess.run(["ffmpeg", "-v", "error", "-y",
                 "-i", ROOT / "Support" / "Art" / "pond.png",
                 "-vf", "crop=iw:315:0:391,scale=1140:-1:flags=lanczos",
                 "-frames:v", "1", str(ASSETS / "pond.png")], check=True)
+
+subprocess.run(["ffmpeg", "-v", "error", "-y",
+                "-i", ROOT / "Support" / "Art" / "pelvic-forest.png",
+                "-vf", "crop=1774:668:0:210,scale=800:-1:flags=lanczos",
+                "-frames:v", "1", "-pix_fmt", "rgba", str(ASSETS / "pelvicForest.png")], check=True)
+
+practice_assets = ASSETS / "PelvicPractice"
+practice_assets.mkdir(exist_ok=True)
+with tempfile.TemporaryDirectory(prefix="restabit-art-") as temp:
+    scratch = Path(temp)
+    animator = scratch / "animate-practice"
+    subprocess.run(["swiftc", "-O", "-module-cache-path", scratch / "modules",
+                    ROOT / "script" / "animate_practice.swift", "-o", animator], check=True)
+    for variant in ("curl", "low", "sway"):
+        sequence = scratch / variant
+        sequence.mkdir()
+        drawing = ROOT / "Support" / "Art" / f"pelvic-tail-{variant}.png"
+        subprocess.run([animator, variant, drawing, sequence], check=True)
+        subprocess.run(["img2webp", "-d", "40", "-lossless", "-m", "6", "-min_size",
+                        *sorted(sequence.glob("frame-*.png")), "-o", practice_assets / f"{variant}.webp"], check=True)

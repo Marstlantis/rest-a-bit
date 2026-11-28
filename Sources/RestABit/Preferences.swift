@@ -41,6 +41,7 @@ final class Preferences: ObservableObject {
         var blinkMotion: BlinkMotion? = nil
         var restScene: RestScene? = nil
         var language: AppLanguage? = nil
+        var pelvicRule: ReminderRule? = nil
     }
 
     init(defaults: UserDefaults? = .standard, previousDomain: String = Preferences.previousDomain) {
@@ -53,7 +54,9 @@ final class Preferences: ObservableObject {
             data = current
         }
         let stored = data.flatMap { try? JSONDecoder().decode(Stored.self, from: $0) }
-        rules = ReminderSchedule(rules: stored?.rules ?? [:]).rules
+        var savedRules = stored?.rules ?? [:]
+        if let pelvicRule = stored?.pelvicRule { savedRules[.pelvicFloor] = pelvicRule }
+        rules = ReminderSchedule(rules: savedRules).rules
         excluded = stored?.excluded ?? []
         autoStart = stored?.autoStart ?? false
         pauseForFullScreen = stored?.pauseForFullScreen ?? true
@@ -66,9 +69,11 @@ final class Preferences: ObservableObject {
     }
 
     private func save() {
-        let stored = Stored(rules: rules, excluded: excluded, autoStart: autoStart,
+        // Older builds still decode the original reminder keys when users roll back.
+        let stored = Stored(rules: rules.filter { $0.key != .pelvicFloor }, excluded: excluded, autoStart: autoStart,
                             pauseForFullScreen: pauseForFullScreen, showMenuBarProgress: showMenuBarProgress,
-                            edgeMotion: edgeMotion, blinkMotion: blinkMotion, restScene: restScene, language: language)
+                            edgeMotion: edgeMotion, blinkMotion: blinkMotion, restScene: restScene, language: language,
+                            pelvicRule: rules[.pelvicFloor])
         if let data = try? JSONEncoder().encode(stored) { defaults?.set(data, forKey: Self.key) }
     }
     #if DEBUG
@@ -90,6 +95,7 @@ final class Preferences: ObservableObject {
         let migrated = Preferences(defaults: fresh, previousDomain: previous)
         guard migrated.rules[.look] == rule,
               migrated.rules[.blink] == ReminderRule(minutes: 10),
+              migrated.rules[.pelvicFloor] == .init(enabled: false, minutes: 120),
               migrated.excluded == excluded, migrated.autoStart, migrated.pauseForFullScreen, !migrated.showMenuBarProgress,
               fresh.data(forKey: key) != nil,
               legacy.data(forKey: previousKey) == encoded else { return false }
@@ -102,8 +108,17 @@ final class Preferences: ObservableObject {
         migrated.blinkMotion = .sway
         migrated.restScene = .shore
         migrated.language = .english
+        let practiceRule = ReminderRule(minutes: 180)
+        migrated.rules[.pelvicFloor] = practiceRule
+        guard let saved = fresh.data(forKey: key),
+              var oldPracticeSettings = (try? JSONSerialization.jsonObject(with: saved)) as? [String: Any]
+        else { return false }
+        oldPracticeSettings["practiceReminders"] = ["date": 0, "count": 2]
+        guard let oldPracticeData = try? JSONSerialization.data(withJSONObject: oldPracticeSettings) else { return false }
+        fresh.set(oldPracticeData, forKey: key)
         let reopened = Preferences(defaults: fresh, previousDomain: previous)
         return !reopened.autoStart && !reopened.pauseForFullScreen && reopened.showMenuBarProgress
+            && reopened.rules[.pelvicFloor] == practiceRule
             && reopened.rules[.look] == rule && reopened.excluded == excluded
             && reopened.edgeMotion == .peek && reopened.blinkMotion == .sway && reopened.restScene == .shore && reopened.language == .english
     }
@@ -136,7 +151,7 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
                 }
                 if loginAtStartup.needsApproval {
-                    Button(Copy.text("打开系统登录项…", "Open System Login Items…")) {
+                    Button(Copy.text("打开系统登录项…", "Open Login Items…")) {
                         loginAtStartup.openLoginItems()
                     }
                     .padding(.leading, 30)
@@ -150,23 +165,25 @@ struct SettingsView: View {
 
             Section {
                 ForEach(Reminder.allCases, id: \.self) { reminder in
-                    let rule = preferences.rules[reminder] ?? ReminderRule(minutes: reminder.defaultMinutes)
+                    let rule = preferences.rules[reminder] ?? reminder.defaultRule
                     HStack(spacing: 8) {
                         ReminderGlyph(reminder: reminder)
                             .foregroundStyle(.secondary)
                         Text(reminder.name)
+                            .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 12)
                         Text(Copy.text("\(rule.minutes) 分钟", "\(rule.minutes) min"))
                             .monospacedDigit()
                             .foregroundStyle(rule.enabled ? Color.primary : Color.secondary)
                             .frame(width: 76, alignment: .trailing)
                         Stepper(value: binding(for: reminder, \.minutes), in: 1...240) {
-                            Text(Copy.text("\(reminder.name)提醒间隔", "\(reminder.name) interval"))
+                            Text(Copy.text("\(reminder.name)提醒间隔", "Interval for \(reminder.name)"))
                         }
                         .labelsHidden()
                         .frame(width: 24, alignment: .trailing)
                         .disabled(!rule.enabled)
-                        .accessibilityValue(Copy.text("\(rule.minutes) 分钟", "\(rule.minutes) minutes"))
+                        .accessibilityValue(Copy.text("\(rule.minutes) 分钟",
+                                                      rule.minutes == 1 ? "1 minute" : "\(rule.minutes) minutes"))
                         Toggle(reminder.name, isOn: binding(for: reminder, \.enabled))
                             .toggleStyle(.switch)
                             .labelsHidden()
@@ -175,33 +192,32 @@ struct SettingsView: View {
                     .frame(minHeight: 24)
                 }
 
-                row(Copy.text("全屏时暂停提醒", "Pause reminders in full screen"), icon: "arrow.up.left.and.arrow.down.right") {
-                    Toggle(Copy.text("全屏时暂停提醒", "Pause reminders in full screen"), isOn: $preferences.pauseForFullScreen)
+                row(Copy.text("全屏时暂停提醒", "Pause in full screen"), icon: "arrow.up.left.and.arrow.down.right") {
+                    Toggle(Copy.text("全屏时暂停提醒", "Pause in full screen"), isOn: $preferences.pauseForFullScreen)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
 
-                row(Copy.text("自动开始休息", "Start breaks automatically"), icon: "timer") {
+                row(Copy.text("自动开始休息", "Start breaks automatically"),
+                    detail: Copy.text("远眺和站立", "Eye and standing breaks"), icon: "timer") {
                     Toggle(Copy.text("自动开始休息", "Start breaks automatically"), isOn: $preferences.autoStart)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
             } header: {
                 Text(Copy.text("提醒间隔", "Reminders"))
-            } footer: {
-                Text(Copy.text("开启后，提醒结束时会自动进入全屏休息。", "When on, full-screen breaks begin after the reminder."))
             }
 
             Section {
-                row(Copy.text("入场动作", "Entrance motion"), icon: "arrow.turn.down.right") {
-                    Picker(Copy.text("入场动作", "Entrance motion"), selection: $preferences.edgeMotion) {
+                row(Copy.text("入场动作", "Entrance animation"), icon: "arrow.turn.down.right") {
+                    Picker(Copy.text("入场动作", "Entrance animation"), selection: $preferences.edgeMotion) {
                         ForEach(EdgeMotion.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
                     .labelsHidden()
                     .fixedSize()
                 }
-                row(Copy.text("眨眼动作", "Blink motion"), icon: "eye") {
-                    Picker(Copy.text("眨眼动作", "Blink motion"), selection: $preferences.blinkMotion) {
+                row(Copy.text("眨眼动作", "Blink animation"), icon: "eye") {
+                    Picker(Copy.text("眨眼动作", "Blink animation"), selection: $preferences.blinkMotion) {
                         ForEach(BlinkMotion.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
                     .labelsHidden()
@@ -215,7 +231,7 @@ struct SettingsView: View {
                     .fixedSize()
                 }
             } header: {
-                Text(Copy.text("动画和插画", "Motion and illustrations"))
+                Text(Copy.text("动画和插画", "Animations and illustrations"))
             }
 
             Section {
@@ -245,7 +261,9 @@ struct SettingsView: View {
             } header: {
                 Text(Copy.text("排除应用", "Excluded Apps"))
             } footer: {
-                Text(Copy.text("这些应用在前台时暂停提醒，离开后等至少 30 秒。", "Reminders pause in these apps and wait at least 30 seconds after you leave."))
+                Text(Copy.text("使用时暂停，切出后至少等 30 秒。", "Pauses in these apps. Waits at least 30 sec after you leave."))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
             }
         }
         .formStyle(.grouped)
@@ -256,8 +274,8 @@ struct SettingsView: View {
     }
 
     private var menuBarProgressRow: some View {
-        let title = Copy.text("菜单栏休息进度", "Break progress in menu bar")
-        let detail = Copy.text("狐狸随下一次远眺或站立的倒计时填色。", "The fox fills as your next eye or standing break approaches.")
+        let title = Copy.text("菜单栏休息进度", "Menu bar progress")
+        let detail = Copy.text("狐狸随下一次远眺或站立的倒计时填色。", "Counts down to an eye or standing break.")
         return row(title, detail: detail) {
             Image(nsImage: StatusIcon.image(accessibilityLabel: "", fill: 0.5))
                 .renderingMode(.template)
@@ -270,8 +288,9 @@ struct SettingsView: View {
         }
     }
 
-    private func row<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        row(title) {
+    private func row<Content: View>(_ title: String, detail: String? = nil, icon: String,
+                                    @ViewBuilder content: () -> Content) -> some View {
+        row(title, detail: detail) {
             Image(systemName: icon)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -304,9 +323,9 @@ struct SettingsView: View {
 
     private func binding<Value>(for reminder: Reminder, _ keyPath: WritableKeyPath<ReminderRule, Value>) -> Binding<Value> {
         Binding {
-            (preferences.rules[reminder] ?? ReminderRule(minutes: reminder.defaultMinutes))[keyPath: keyPath]
+            (preferences.rules[reminder] ?? reminder.defaultRule)[keyPath: keyPath]
         } set: { value in
-            preferences.rules[reminder, default: ReminderRule(minutes: reminder.defaultMinutes)][keyPath: keyPath] = value
+            preferences.rules[reminder, default: reminder.defaultRule][keyPath: keyPath] = value
         }
     }
 }

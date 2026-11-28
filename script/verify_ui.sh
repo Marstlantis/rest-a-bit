@@ -30,7 +30,7 @@ if [[ ! -s "$DIR/fixture-ready.txt" ]]; then
 fi
 PID="$(cat "$DIR/fixture-ready.txt")"
 open -g -n "$ROOT/dist/Rest a Bit.app" --args --ui-probe "$DIR" "$PID" "$@"
-for _ in {1..350}; do
+for _ in {1..440}; do
     [[ ! -s "$DIR/result.txt" ]] || break
     sleep 0.2
 done
@@ -54,6 +54,14 @@ rg -q '^Live language chinese updated: true$' "$DIR/result.txt"
 rg -q '^Combined English cue fits beside the fox: true$' "$DIR/result.txt"
 rg -q '^Excluded app appears after sheet closes without reopening settings: true$' "$DIR/result.txt"
 rg -q '^Native full-screen pause, toggle, and exit verified: true$' "$DIR/result.txt"
+rg -q '^Centered pelvic practice waits for consent, renders both phases, and closes: true$' "$DIR/result.txt"
+if cmp -s "$DIR/practice-forest-ready.png" "$DIR/practice-forest-transition.png" ||
+   cmp -s "$DIR/practice-forest-transition.png" "$DIR/practice-forest-squeeze.png" ||
+   cmp -s "$DIR/practice-forest-squeeze.png" "$DIR/practice-forest-release.png"; then
+    echo "Practice animation did not render distinct frames through the transition." >&2
+    exit 1
+fi
+cmp "$DIR/practice-forest-ready.png" "$DIR/practice-forest-release.png"
 rg -q '^Automatic reminder held for the excluded foreground app: true$' "$DIR/result.txt"
 rg -q '^Excluded icon and nested helper matching verified: true$' "$DIR/result.txt"
 rg -q '^Scheduled edge reminder skips overlapping blink: true$' "$DIR/result.txt"
@@ -69,7 +77,7 @@ rg -q '^Rest illustration grove rendered: true$' "$DIR/result.txt"
 rg -q '^Dark illustration and callout rendered: true$' "$DIR/result.txt"
 rg -q '^Login item registration states verified without changing login items: true$' "$DIR/result.txt"
 rg -q '^Water scene is centered and leaves focus on the editor: true$' "$DIR/result.txt"
-rg -q '^Water cue fits its complete localized text: true$' "$DIR/result.txt"
+rg -q '^Water cue fits its complete English text: true$' "$DIR/result.txt"
 rg -q '^Status icon hover does not show the app name: true$' "$DIR/result.txt"
 rg -q '^Native status hover countdown, localization, pause and menu dismissal: true$' "$DIR/result.txt"
 rg -q '^Optional menu-bar progress, pause, snooze and static fallback verified: true$' "$DIR/result.txt"
